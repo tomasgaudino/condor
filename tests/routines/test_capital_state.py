@@ -8,9 +8,12 @@ live Condor client and is exercised manually from `/routines` in Telegram.
 from __future__ import annotations
 
 from routines.capital_state import (
+    GLOSSARY,
     _bar,
     _build_controllers_table,
+    _build_glossary_markdown,
     _build_kpi_sections,
+    _build_narrative,
     _compute_controller_block,
     _compute_global_block,
     _compute_summary,
@@ -20,6 +23,7 @@ from routines.capital_state import (
     _parse_pair,
     _render_compact_summary,
     _resolve_perf,
+    _select_glossary_terms,
     _severity,
     _split_csv,
 )
@@ -771,3 +775,175 @@ def test_controllers_table_handles_empty():
     cols, rows = _build_controllers_table(payload)
     assert rows == []
     assert len(cols) > 0  # columns are stable even with no rows
+
+
+# ---------------------------------------------------------------------------
+# Narrative summary — deterministic prose
+# ---------------------------------------------------------------------------
+
+
+def test_narrative_handles_no_controllers():
+    """Empty scope must say so explicitly, not produce a misleading green status."""
+    text = _build_narrative(_empty_payload())
+    assert "Sin controllers" in text or "sin controllers" in text.lower()
+
+
+def test_narrative_green_when_healthy():
+    """No alerts + ample headroom + no stuck → 🟢."""
+    payload = _payload_with_n_controllers(4)
+    payload["summary"]["wallet_total_value_usd"] = 10_000.0
+    payload["global"]["wallet"] = {
+        "USDT": {"value_usd": 10_000.0, "headroom_usd": 9_000.0}
+    }
+    text = _build_narrative(payload)
+    assert "🟢" in text
+    assert "estable" in text.lower()
+
+
+def test_narrative_red_when_negative_headroom():
+    """Negative headroom → 🔴 + recomendación de reducir exposición."""
+    payload = _payload_with_n_controllers(3)
+    payload["summary"]["wallet_total_value_usd"] = 1_000.0
+    payload["global"]["wallet"] = {
+        "USDT": {"value_usd": 1_000.0, "headroom_usd": -200.0}
+    }
+    text = _build_narrative(payload)
+    assert "🔴" in text
+    assert "reducir exposición" in text.lower() or "reducir exposicion" in text.lower()
+
+
+def test_narrative_red_when_critical_alert_present():
+    """A crit-severity alert escalates the status to 🔴 even with positive headroom."""
+    payload = _payload_with_n_controllers(3)
+    payload["summary"]["wallet_total_value_usd"] = 10_000.0
+    payload["global"]["wallet"] = {
+        "USDT": {"value_usd": 10_000.0, "headroom_usd": 5_000.0}
+    }
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 2.5, "severity": "crit", "controllers": []}
+    ]
+    text = _build_narrative(payload)
+    assert "🔴" in text
+    assert "BTC" in text
+    assert "2.5" in text
+
+
+def test_narrative_yellow_when_warn_alert():
+    """warn but no crit → 🟡 (atención)."""
+    payload = _payload_with_n_controllers(3)
+    payload["summary"]["wallet_total_value_usd"] = 10_000.0
+    payload["global"]["wallet"] = {
+        "USDT": {"value_usd": 10_000.0, "headroom_usd": 5_000.0}
+    }
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 1.2, "severity": "warn", "controllers": []}
+    ]
+    text = _build_narrative(payload)
+    assert "🟡" in text
+
+
+def test_narrative_mentions_stuck_controller_by_name_when_only_one():
+    payload = _payload_with_n_controllers(3)
+    payload["summary"]["wallet_total_value_usd"] = 10_000.0
+    payload["global"]["wallet"] = {
+        "USDT": {"value_usd": 10_000.0, "headroom_usd": 5_000.0}
+    }
+    payload["controllers"][2]["diagnostic"]["stuck_suspect"] = True
+    text = _build_narrative(payload)
+    assert "atascado" in text.lower()
+    assert "ctrl-2" in text  # the specific controller name
+
+
+def test_narrative_aggregates_when_multiple_stuck():
+    payload = _payload_with_n_controllers(5)
+    payload["summary"]["wallet_total_value_usd"] = 10_000.0
+    payload["global"]["wallet"] = {
+        "USDT": {"value_usd": 10_000.0, "headroom_usd": 5_000.0}
+    }
+    for i in (0, 2, 4):
+        payload["controllers"][i]["diagnostic"]["stuck_suspect"] = True
+    text = _build_narrative(payload)
+    assert "3 controllers" in text and "atascados" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Glossary selection + rendering
+# ---------------------------------------------------------------------------
+
+
+def test_glossary_basic_terms_always_included():
+    """Even on a healthy system, the four basics are present."""
+    payload = _payload_with_n_controllers(2)
+    terms = _select_glossary_terms(payload)
+    for required in ("controller", "nominal", "committed", "headroom"):
+        assert required in terms
+
+
+def test_glossary_omits_oversub_when_no_alerts():
+    payload = _payload_with_n_controllers(2)
+    terms = _select_glossary_terms(payload)
+    assert "oversubscription" not in terms
+    assert "severity" not in terms
+
+
+def test_glossary_includes_oversub_when_alerts_present():
+    payload = _payload_with_n_controllers(2)
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 1.2, "severity": "warn", "controllers": []}
+    ]
+    terms = _select_glossary_terms(payload)
+    assert "oversubscription" in terms
+    assert "severity" in terms
+
+
+def test_glossary_omits_stuck_when_no_stuck_controllers():
+    payload = _payload_with_n_controllers(3)
+    terms = _select_glossary_terms(payload)
+    assert "stuck" not in terms
+    assert "take_profit" not in terms
+
+
+def test_glossary_includes_stuck_when_any_controller_flagged():
+    payload = _payload_with_n_controllers(3)
+    payload["controllers"][1]["diagnostic"]["stuck_suspect"] = True
+    terms = _select_glossary_terms(payload)
+    assert "stuck" in terms
+    assert "take_profit" in terms
+
+
+def test_glossary_includes_worst_case_when_any_above_nominal():
+    payload = _payload_with_n_controllers(2)
+    # default _payload_with_n_controllers gives worst=300, nominal=30 → trigger
+    terms = _select_glossary_terms(payload)
+    assert "worst_case" in terms
+
+
+def test_glossary_omits_worst_case_when_nominal_equals_worst():
+    payload = _payload_with_n_controllers(1)
+    payload["controllers"][0]["capital"]["worst_case_usd"] = 30.0  # = nominal
+    terms = _select_glossary_terms(payload)
+    assert "worst_case" not in terms
+
+
+def test_glossary_markdown_renders_only_selected_terms():
+    payload = _payload_with_n_controllers(2)  # healthy → minimal glossary
+    md = _build_glossary_markdown(payload)
+    # Should include basics
+    assert "**Controller**" in md
+    assert "**Nominal**" in md
+    # Should NOT include conditional ones
+    assert "**Oversubscription**" not in md
+    assert "**Stuck**" not in md
+
+
+def test_glossary_keys_all_have_definitions():
+    """Sanity: every key referenced by _select_glossary_terms exists in GLOSSARY."""
+    # Force selection of every possible term
+    payload = _payload_with_n_controllers(1)
+    payload["controllers"][0]["diagnostic"]["stuck_suspect"] = True
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "X", "ratio": 1.0, "severity": "warn", "controllers": []}
+    ]
+    terms = _select_glossary_terms(payload)
+    for t in terms:
+        assert t in GLOSSARY, f"glossary missing definition for {t!r}"

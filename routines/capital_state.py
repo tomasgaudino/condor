@@ -592,6 +592,204 @@ def _build_controllers_table(
     return columns, rows
 
 
+# ---------------------------------------------------------------------------
+# Narrative summary + glossary — make the report transmissible
+# ---------------------------------------------------------------------------
+
+
+GLOSSARY: dict[str, str] = {
+    "controller": (
+        "Un bot que opera un par de mercado (ej. BTC-USDT) con una "
+        "estrategia configurada. Cada uno tiene su propio capital asignado."
+    ),
+    "nominal": (
+        "El capital \"asignado\" formalmente al controller en su config "
+        "(`total_amount_quote × portfolio_allocation`). Es lo que el "
+        "controller cree que tiene para operar."
+    ),
+    "committed": (
+        "El capital **realmente atado** ahora mismo en posiciones abiertas. "
+        "Si es mayor al nominal, el controller está operando por encima de "
+        "su asignación formal — algo común con `max_active_executors_by_level > 1`."
+    ),
+    "worst_case": (
+        "El techo teórico de capital comprometido si todos los executors se "
+        "llenaran a la vez (`nominal × max_active_executors_by_level`). En la "
+        "práctica casi nunca se alcanza, pero marca el límite operativo."
+    ),
+    "headroom": (
+        "Capital de wallet que **todavía no está comprometido** y se podría "
+        "usar. Si es negativo, el sistema está pidiendo más capital del que "
+        "hay (riesgo de `insufficient_balance` al colocar nuevas órdenes)."
+    ),
+    "oversubscription": (
+        "Cuando la suma del capital potencial de varios controllers que "
+        "comparten un activo (ej. todos los que tradean BRL) excede el "
+        "balance real del wallet en ese activo. El ratio mide cuántas "
+        "veces se excede."
+    ),
+    "severity": (
+        "Niveles de alerta de oversubscripción: `info` (<1×, sano), "
+        "`warn` (1–1.5×, atender), `crit` (≥1.5×, riesgo serio)."
+    ),
+    "take_profit": (
+        "Distancia de precio a la que el controller cierra una posición "
+        "ganando. Un TP muy ajustado (~ 1 punto básico = 0.01%) requiere "
+        "movimientos pequeños del precio para ejecutarse."
+    ),
+    "stuck": (
+        "Heurística: un controller con TP muy ajustado **+** una posición "
+        "que está en breakeven o ganando pero no cerró. Suele indicar que "
+        "el TP es tan chico que el precio nunca lo toca con suficiente "
+        "margen, y la posición queda colgada."
+    ),
+}
+
+
+def _select_glossary_terms(payload: dict[str, Any]) -> list[str]:
+    """Return the subset of glossary keys relevant to the current payload.
+
+    Always includes the basics (controller, nominal, committed, headroom).
+    Adds worst_case / oversubscription / severity / take_profit / stuck
+    only when they actually appear in the data, so the glossary stays
+    short when the system is healthy.
+    """
+    terms = ["controller", "nominal", "committed", "headroom"]
+    controllers = payload.get("controllers", [])
+    alerts = payload.get("global", {}).get("oversub_alerts", [])
+
+    if any(
+        c.get("capital", {}).get("worst_case_usd", 0)
+        > c.get("capital", {}).get("nominal_budget_usd", 0)
+        for c in controllers
+    ):
+        terms.append("worst_case")
+    if alerts:
+        terms.append("oversubscription")
+        terms.append("severity")
+    if any(c.get("diagnostic", {}).get("stuck_suspect") for c in controllers):
+        terms.append("take_profit")
+        terms.append("stuck")
+    return terms
+
+
+def _build_narrative(payload: dict[str, Any]) -> str:
+    """Generate a deterministic 2-4 sentence summary in plain Spanish.
+
+    No LLM, no inference — pure rules over the payload. The narrative
+    leads with overall status (🟢/🟡/🔴), then surfaces the most
+    actionable signal, then a softly-worded recommendation.
+    """
+    summary = payload.get("summary", {})
+    wallet = payload.get("global", {}).get("wallet", {})
+    alerts = payload.get("global", {}).get("oversub_alerts", [])
+    controllers = payload.get("controllers", [])
+
+    if not controllers:
+        return (
+            "ℹ️ **Sin controllers en scope.** No hay nada que reportar — "
+            "verificá el filtro `controller_filter` o que haya bots activos."
+        )
+
+    n_ctrl = summary.get("total_controllers", 0)
+    committed = summary.get("total_committed_now_usd", 0.0)
+    wallet_total = summary.get("wallet_total_value_usd", 0.0)
+    headroom = sum(
+        float(w.get("headroom_usd", 0.0) or 0.0) for w in wallet.values()
+    )
+    headroom_pct = headroom / wallet_total if wallet_total > 0 else 0.0
+    n_stuck = sum(
+        1 for c in controllers if c.get("diagnostic", {}).get("stuck_suspect")
+    )
+    crit_alerts = [a for a in alerts if a.get("severity") == "crit"]
+
+    # ── Status classification ─────────────────────────────────────────
+    if headroom < 0 or crit_alerts:
+        status_emoji = "🔴"
+        status_label = "El sistema está sobre-comprometido"
+    elif alerts or n_stuck or headroom_pct < 0.30:
+        status_emoji = "🟡"
+        status_label = "El sistema requiere atención"
+    else:
+        status_emoji = "🟢"
+        status_label = "Operación estable"
+
+    sentences: list[str] = []
+
+    # ── First sentence: status + headline numbers ─────────────────────
+    sentences.append(
+        f"{status_emoji} **{status_label}**: "
+        f"{n_ctrl} controllers operando, "
+        f"{_fmt_usd(committed)} comprometidos contra "
+        f"{_fmt_usd(wallet_total)} de wallet "
+        f"(headroom {_fmt_usd(headroom)})."
+    )
+
+    # ── Second sentence: worst alert if any ──────────────────────────
+    if crit_alerts:
+        worst = max(crit_alerts, key=lambda a: a.get("ratio", 0))
+        sentences.append(
+            f"El recurso más tensionado es **{worst.get('asset', '?')}** "
+            f"(oversub {worst.get('ratio', 0):.1f}×, crítica)."
+        )
+    elif alerts:
+        worst = max(alerts, key=lambda a: a.get("ratio", 0))
+        sentences.append(
+            f"Hay {len(alerts)} alerta(s) de oversubscripción; la más alta "
+            f"es **{worst.get('asset', '?')}** ({worst.get('ratio', 0):.1f}×)."
+        )
+
+    # ── Third sentence: stuck controllers if any ─────────────────────
+    if n_stuck == 1:
+        worst_stuck = next(
+            c for c in controllers if c.get("diagnostic", {}).get("stuck_suspect")
+        )
+        sentences.append(
+            f"1 controller muestra señales de estar atascado "
+            f"(`{worst_stuck.get('config_name', '?')}` — "
+            f"TP muy ajustado con posición sin cerrar)."
+        )
+    elif n_stuck > 1:
+        sentences.append(
+            f"{n_stuck} controllers muestran señales de estar atascados "
+            f"(TP muy ajustado con posiciones sin cerrar)."
+        )
+
+    # ── Fourth sentence: soft recommendation ─────────────────────────
+    if status_emoji == "🔴":
+        sentences.append(
+            "La situación sugiere reducir exposición o esperar a que las "
+            "posiciones se desarmen antes de abrir nuevas."
+        )
+    elif status_emoji == "🟡":
+        if n_stuck:
+            sentences.append(
+                "Vale la pena revisar los controllers marcados como atascados "
+                "antes de seguir operando."
+            )
+        else:
+            sentences.append(
+                "Conviene monitorear más seguido hasta que el headroom recupere "
+                "margen."
+            )
+    # 🟢 caso: no agregar recomendación — la primera frase ya alcanza.
+
+    return " ".join(sentences)
+
+
+def _build_glossary_markdown(payload: dict[str, Any]) -> str:
+    """Render the relevant glossary entries as a single markdown block."""
+    terms = _select_glossary_terms(payload)
+    lines = ["## Conceptos clave"]
+    for key in terms:
+        if key not in GLOSSARY:
+            continue
+        # Display name: "take_profit" → "Take profit", "worst_case" → "Worst case"
+        display = key.replace("_", " ").capitalize()
+        lines.append(f"- **{display}** · {GLOSSARY[key]}")
+    return "\n".join(lines)
+
+
 def _render_monitor(payload: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("📊 *PORTFOLIO UTILIZATION*")
@@ -867,6 +1065,11 @@ def _save_report(payload: dict[str, Any]) -> str | None:
     else:
         builder.kpi("Alerts", "0", delta="all clear", trend="up")
 
+    # Narrative summary — sits between KPIs and the data sections so anyone
+    # opening the report has an immediately transmissible read of the state
+    # before diving into wallet/alerts/table.
+    builder.markdown("## Resumen\n\n" + _build_narrative(payload))
+
     # Wallet section
     if wallet:
         wallet_lines = ["## Wallet"]
@@ -895,5 +1098,10 @@ def _save_report(payload: dict[str, Any]) -> str | None:
     if rows:
         builder.markdown("## Controllers (sorted by utilization)")
         builder.table(rows, columns=columns)
+
+    # Glossary — at the very bottom so anyone receiving the report can
+    # decode the narrative + KPIs without having to ask.  Filtered to
+    # only the terms relevant to this snapshot.
+    builder.markdown(_build_glossary_markdown(payload))
 
     return builder.save()
