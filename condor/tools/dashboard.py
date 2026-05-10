@@ -137,9 +137,15 @@ async def _run_capital_state(
         target_chat_id=None,  # never send to Telegram from the CLI
     )
 
-    # The routine returns "monitor + ```json\n...\n``` "
-    # We re-extract the JSON portion to render with our own template.
-    raw = await capital_state_run(config, context)
+    # The routine returns a RoutineResult whose `sections[0]` ("payload")
+    # carries the full structured payload. Fall back to text-extraction
+    # for older string-returning shapes.
+    result = await capital_state_run(config, context)
+    if hasattr(result, "sections") and result.sections:
+        for sec in result.sections:
+            if sec.get("title") == "payload":
+                return sec["data"]
+    raw = result.text if hasattr(result, "text") else str(result)
     return _extract_payload(raw)
 
 
