@@ -48,6 +48,25 @@ mencioná en una línea al final del reporte algo como:
 "💡 Recordá: revisé LEARNINGS.md, X lecciones activas." Esto fuerza
 no recaer en errores ya cometidos.
 
+## Cierre del día — recordatorio de handoff
+
+Al final del reporte, agregá siempre este bloque (1 línea cada uno):
+
+```
+💾 ¿Cerrando la sesión hoy? Recordá:
+  1. Agregar entrada nueva arriba en SESSION_LOG.md (resumen +
+     fricciones + "para retomar mañana"). Mientras el contexto está
+     fresco — yo no me voy a acordar mañana.
+  2. ¿Hay alguna lección nueva que registrar en LEARNINGS.md? Mejor
+     tres líneas hoy que media hora redescubriendo el error mañana.
+  3. Considerar push de `feat/pmm_mister_supervisor` si querés que
+     sobreviva por si el filesystem local falla.
+```
+
+El usuario decide si actuar o no — pero el recordatorio aparece
+siempre. Si la última entrada de `SESSION_LOG.md` ya es de hoy, decir
+"última entrada del log ya es de hoy, listo" en lugar del bloque.
+
 ## Reglas
 
 - **No** listes cada subtarea done. Solo conteo agregado.
