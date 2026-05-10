@@ -429,20 +429,34 @@ def _render_compact_summary(payload: dict[str, Any]) -> str:
         f"Alerts: {len(alerts)}"
     )
     lines.append(
-        f"Committed: {_fmt_usd(summary.get('total_committed_now_usd', 0.0))} / "
-        f"Nominal: {_fmt_usd(summary.get('total_nominal_budget_usd', 0.0))} / "
-        f"Worst: {_fmt_usd(summary.get('total_worst_case_usd', 0.0))}"
+        f"Capital: {_fmt_usd(summary.get('total_committed_now_usd', 0.0))} / "
+        f"{_fmt_usd(summary.get('total_nominal_budget_usd', 0.0))} nominal "
+        f"(worst-case {_fmt_usd(summary.get('total_worst_case_usd', 0.0))})"
     )
-    lines.append(
-        f"Wallet total: {_fmt_usd(summary.get('wallet_total_value_usd', 0.0))} "
-        f"({len(wallet)} assets)"
-    )
+
+    wallet_total = summary.get("wallet_total_value_usd", 0.0)
+    has_oversub = bool(alerts)
+    if has_oversub:
+        # Surface wallet headroom (supply minus used_now across all assets).
+        headroom = sum(
+            float(w.get("headroom_usd", 0.0) or 0.0) for w in wallet.values()
+        )
+        lines.append(
+            f"Wallet: {_fmt_usd(wallet_total)} total · "
+            f"headroom: {_fmt_usd(headroom)}"
+        )
+    else:
+        lines.append(
+            f"Wallet total: {_fmt_usd(wallet_total)} ({len(wallet)} assets)"
+        )
+
     if alerts:
         worst = max(alerts, key=lambda a: a.get("ratio", 0))
-        lines.append(
-            f"WORST: {worst.get('asset','?')} {worst.get('ratio',0):.2f}x "
-            f"({worst.get('severity','?')})"
-        )
+        if worst.get("severity") == "crit":
+            lines.append(
+                f"WORST: {worst.get('asset','?')} {worst.get('ratio',0):.2f}x "
+                f"({worst.get('severity','?')})"
+            )
     elif not controllers:
         lines.append("(no controllers matched filter)")
     return "\n".join(lines)

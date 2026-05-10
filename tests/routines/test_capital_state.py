@@ -414,20 +414,54 @@ def test_compact_summary_helpful_when_no_controllers():
     assert "no controllers matched" in text.lower()
 
 
-def test_summary_picks_max_oversub_ratio():
-    global_block = {
-        "oversub_alerts": [
-            {"asset": "BTC", "ratio": 1.2, "severity": "warn", "controllers": []},
-            {"asset": "USDT", "ratio": 1.8, "severity": "crit", "controllers": []},
-        ]
+def test_compact_summary_shows_capital_line_with_worst_in_parens():
+    payload = _empty_payload()
+    payload["summary"]["total_committed_now_usd"] = 72_000.0
+    payload["summary"]["total_nominal_budget_usd"] = 95_000.0
+    payload["summary"]["total_worst_case_usd"] = 141_400.0
+    text = _render_compact_summary(payload)
+    # New format: committed / nominal nominal (worst-case ...)
+    assert "nominal" in text.lower()
+    assert "worst-case" in text.lower()
+    # Worst should be parenthesized, not the main figure
+    assert "(worst-case" in text
+
+
+def test_compact_summary_shows_headroom_when_oversub():
+    payload = _empty_payload()
+    payload["summary"]["wallet_total_value_usd"] = 10_000.0
+    payload["global"]["wallet"] = {
+        "BTC": {"value_usd": 6000.0, "headroom_usd": 1500.0},
+        "USDT": {"value_usd": 4000.0, "headroom_usd": 500.0},
     }
-    summary = _compute_summary([], global_block, wallet_total=0.0)
-    assert summary["any_oversub"] is True
-    assert summary["max_oversub_ratio"] == 1.8
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 1.2, "severity": "warn"}
+    ]
+    text = _render_compact_summary(payload)
+    assert "headroom" in text.lower()
+
+
+def test_compact_summary_omits_worst_line_for_warn_only():
+    """warn severity is implicit in the alerts header — no extra WORST line."""
+    payload = _empty_payload()
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 1.2, "severity": "warn"}
+    ]
+    text = _render_compact_summary(payload)
+    assert "WORST:" not in text
+
+
+def test_compact_summary_shows_worst_line_for_crit():
+    payload = _empty_payload()
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 2.0, "severity": "crit"}
+    ]
+    text = _render_compact_summary(payload)
+    assert "WORST:" in text
 
 
 # ---------------------------------------------------------------------------
-# _resolve_perf — resilient matching of performance dict to controller config
+# Performance-resolver helper (_resolve_perf)
 # ---------------------------------------------------------------------------
 
 
@@ -483,3 +517,15 @@ def test_resolve_perf_handles_unwrapped_entry():
     out = _resolve_perf(perf_by_id, cfg)
     assert out is not None
     assert out["positions_summary"][0]["current_value"] == 3.0
+
+
+def test_summary_picks_max_oversub_ratio():
+    global_block = {
+        "oversub_alerts": [
+            {"asset": "BTC", "ratio": 1.2, "severity": "warn", "controllers": []},
+            {"asset": "USDT", "ratio": 1.8, "severity": "crit", "controllers": []},
+        ]
+    }
+    summary = _compute_summary([], global_block, wallet_total=0.0)
+    assert summary["any_oversub"] is True
+    assert summary["max_oversub_ratio"] == 1.8
