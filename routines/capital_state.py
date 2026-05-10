@@ -600,6 +600,18 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                                 inner.get("trading_pair"),
                                 len(inner.get("positions_summary") or []) if "positions_summary" in inner else "absent",
                             )
+                            # Dump shape of the first position_summary item if present
+                            ps = inner.get("positions_summary") or []
+                            if ps and isinstance(ps[0], dict):
+                                logger.info(
+                                    "[diag] FIRST positions_summary[0] keys=%s sample_values=%s",
+                                    list(ps[0].keys()),
+                                    {k: ps[0].get(k) for k in (
+                                        "current_value", "amount", "amount_quote",
+                                        "filled_amount_quote", "value", "side",
+                                        "entry_price", "current_price", "unrealized_pnl_quote",
+                                    )},
+                                )
                     else:
                         logger.info("[diag] FIRST perf entry not a dict: type=%s", type(sample_val).__name__)
                 else:
