@@ -10,6 +10,7 @@ from __future__ import annotations
 from routines.capital_state import (
     GLOSSARY,
     _bar,
+    _build_agent_payload,
     _build_controllers_table,
     _build_glossary_markdown,
     _build_kpi_sections,
@@ -947,3 +948,226 @@ def test_glossary_keys_all_have_definitions():
     terms = _select_glossary_terms(payload)
     for t in terms:
         assert t in GLOSSARY, f"glossary missing definition for {t!r}"
+
+
+# ---------------------------------------------------------------------------
+# Agent-facing payload — the contract the adaptive agent's LLM consumes
+# ---------------------------------------------------------------------------
+
+
+def _full_payload_with_one_stuck_oversub() -> dict:
+    """Realistic payload covering all branches the agent payload exercises."""
+    return {
+        "ts": "2026-05-10T05:00:00Z",
+        "summary": {
+            "total_controllers": 2,
+            "total_committed_now_usd": 1600.0,
+            "wallet_total_value_usd": 10_000.0,
+            "any_oversub": True,
+            "max_oversub_ratio": 1.4,
+        },
+        "global": {
+            "wallet": {
+                "BTC": {
+                    "balance": 0.1,
+                    "value_usd": 6500.0,
+                    "used_now_usd": 100.0,
+                    "headroom_usd": 6400.0,
+                    "controllers_using": [],
+                },
+                "USDT": {
+                    "balance": 3500.0,
+                    "value_usd": 3500.0,
+                    "used_now_usd": 100.0,
+                    "headroom_usd": 3400.0,
+                    "controllers_using": [],
+                },
+            },
+            "oversub_alerts": [
+                {
+                    "asset": "BTC",
+                    "ratio": 1.4,
+                    "severity": "warn",
+                    "controllers": ["bot::c1"],
+                },
+            ],
+        },
+        "controllers": [
+            {
+                "id": "bot::c1",
+                "config_name": "c1",
+                "bot_name": "bot",
+                "trading_pair": "BTC-USDT",
+                "base_asset": "BTC",
+                "quote_asset": "USDT",
+                "connector_name": "binance",
+                "capital": {
+                    "nominal_budget_usd": 30.0,
+                    "committed_now_usd": 1500.0,
+                    "worst_case_usd": 300.0,
+                    "utilization_now": 50.0,
+                    "utilization_vs_worst": 5.0,
+                    "active_executors_count": 1,
+                },
+                "config": {
+                    "total_amount_quote": 1000.0,
+                    "portfolio_allocation": 0.03,
+                    "max_active_executors_by_level": 10,
+                    "buy_levels": 2,
+                    "sell_levels": 2,
+                    "take_profit": 0.0001,
+                },
+                "inventory": {
+                    "current_base_pct": 0.5,
+                    "target_base_pct": 0.5,
+                    "min_base_pct": 0.3,
+                    "max_base_pct": 0.7,
+                    "in_range": True,
+                    "drift_from_target": 0.0,
+                },
+                "diagnostic": {
+                    "stuck_suspect": True,
+                    "positions_at_or_above_breakeven": 1,
+                },
+                "history": {"lookback_hours": 24, "available": False, "samples": 0},
+            },
+            {
+                "id": "bot::c2",
+                "config_name": "c2",
+                "bot_name": "bot",
+                "trading_pair": "ETH-USDT",
+                "base_asset": "ETH",
+                "quote_asset": "USDT",
+                "connector_name": "binance",
+                "capital": {
+                    "nominal_budget_usd": 50.0,
+                    "committed_now_usd": 100.0,
+                    "worst_case_usd": 500.0,
+                    "utilization_now": 2.0,
+                    "utilization_vs_worst": 0.2,
+                    "active_executors_count": 0,
+                },
+                "config": {
+                    "total_amount_quote": 1000.0,
+                    "portfolio_allocation": 0.05,
+                    "max_active_executors_by_level": 10,
+                    "buy_levels": 2,
+                    "sell_levels": 2,
+                    "take_profit": 0.001,
+                },
+                "inventory": {
+                    "current_base_pct": 0.3,
+                    "target_base_pct": 0.5,
+                    "min_base_pct": 0.3,
+                    "max_base_pct": 0.7,
+                    "in_range": True,
+                    "drift_from_target": -0.2,
+                },
+                "diagnostic": {
+                    "stuck_suspect": False,
+                    "positions_at_or_above_breakeven": 0,
+                },
+                "history": {"lookback_hours": 24, "available": False, "samples": 0},
+            },
+        ],
+    }
+
+
+def test_agent_payload_has_top_level_keys():
+    """Agent contract: ts, controllers, wallet, oversub_alerts, totals."""
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    assert set(out.keys()) == {"ts", "controllers", "wallet", "oversub_alerts", "totals"}
+
+
+def test_agent_payload_drops_human_decorations():
+    """Inventory plane, history, connector_name, etc. are NOT in the agent view."""
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    c = out["controllers"][0]
+    # Per-controller agent fields
+    assert set(c.keys()) == {"id", "trading_pair", "base_asset", "quote_asset",
+                             "capital", "config", "diagnostic"}
+    # No inventory or history
+    assert "inventory" not in c
+    assert "history" not in c
+    assert "connector_name" not in c
+    assert "config_name" not in c
+    assert "bot_name" not in c
+
+
+def test_agent_payload_capital_fields_minimal():
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    cap = out["controllers"][0]["capital"]
+    assert set(cap.keys()) == {"nominal_budget_usd", "committed_now_usd",
+                                "worst_case_usd", "utilization_now"}
+    # No utilization_vs_worst (redundant for the agent)
+    assert "utilization_vs_worst" not in cap
+
+
+def test_agent_payload_config_only_actionable_fields():
+    """The agent only needs fields it can reason about modifying."""
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    cfg = out["controllers"][0]["config"]
+    assert set(cfg.keys()) == {"take_profit", "max_active_executors_by_level",
+                                "portfolio_allocation"}
+
+
+def test_agent_payload_diagnostic_is_compact():
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    diag = out["controllers"][0]["diagnostic"]
+    assert set(diag.keys()) == {"stuck_suspect", "active_executors"}
+    assert diag["stuck_suspect"] is True
+    assert diag["active_executors"] == 1
+
+
+def test_agent_payload_wallet_only_value_and_headroom():
+    """No `balance`, no `used_now_usd`, no `controllers_using` in the agent view."""
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    btc = out["wallet"]["BTC"]
+    assert set(btc.keys()) == {"value_usd", "headroom_usd"}
+
+
+def test_agent_payload_preserves_oversub_alerts_with_controller_list():
+    """Cross-references between alerts and controllers MUST be preserved —
+    they're how the agent knows which controllers a given asset oversub
+    affects."""
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    assert len(out["oversub_alerts"]) == 1
+    a = out["oversub_alerts"][0]
+    assert a["asset"] == "BTC"
+    assert a["ratio"] == 1.4
+    assert a["severity"] == "warn"
+    assert a["controllers"] == ["bot::c1"]
+
+
+def test_agent_payload_totals_aggregated_once():
+    """Totals are pre-computed so the agent doesn't re-aggregate."""
+    out = _build_agent_payload(_full_payload_with_one_stuck_oversub())
+    t = out["totals"]
+    assert t["controllers"] == 2
+    assert t["committed_usd"] == 1600.0
+    assert t["wallet_usd"] == 10_000.0
+    # 6400 + 3400 = 9800 (sum of headroom_usd across wallet entries)
+    assert t["headroom_usd"] == 9800.0
+    assert t["stuck_count"] == 1
+
+
+def test_agent_payload_handles_empty_payload_gracefully():
+    out = _build_agent_payload({})
+    assert out["controllers"] == []
+    assert out["wallet"] == {}
+    assert out["oversub_alerts"] == []
+    assert out["totals"]["controllers"] == 0
+    assert out["totals"]["headroom_usd"] == 0.0
+    assert out["totals"]["stuck_count"] == 0
+
+
+def test_agent_payload_size_fits_llm_context():
+    """Sanity check: the agent view stays small even at scale."""
+    import json
+    # Synthesize 50 controllers — way more than realistic
+    base = _full_payload_with_one_stuck_oversub()
+    base["controllers"] = base["controllers"] * 25  # 50 controllers
+    out = _build_agent_payload(base)
+    serialized = json.dumps(out)
+    # Should comfortably fit in any modern LLM context
+    assert len(serialized) < 50_000, f"agent payload too large: {len(serialized)}"

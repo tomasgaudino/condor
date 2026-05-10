@@ -790,6 +790,94 @@ def _build_glossary_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Agent-facing payload — minimal, no human decorations
+# ---------------------------------------------------------------------------
+
+
+def _build_agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip the rich payload down to what the adaptive agent's LLM needs.
+
+    See ``.planning/strategy-framework/AGENT_VS_USER_VIEW.md`` for the
+    rationale. The agent sees raw structural data (no narrative, no
+    glossary, no pre-rendered tables/KPIs, no inventory plane) — just
+    the fields it queries to answer its decision questions.
+
+    Schema is stable: tests exercise it.  When the agent contract
+    evolves, update this function and AGENT_VS_USER_VIEW.md together.
+    """
+    summary = payload.get("summary", {}) or {}
+    wallet_in = payload.get("global", {}).get("wallet", {}) or {}
+    alerts = payload.get("global", {}).get("oversub_alerts", []) or []
+    controllers_in = payload.get("controllers", []) or []
+
+    # Per-controller: drop inventory + history + connector_name etc.
+    controllers_out: list[dict[str, Any]] = []
+    for c in controllers_in:
+        cap = c.get("capital", {}) or {}
+        cfg = c.get("config", {}) or {}
+        diag = c.get("diagnostic", {}) or {}
+        controllers_out.append({
+            "id": c.get("id"),
+            "trading_pair": c.get("trading_pair"),
+            "base_asset": c.get("base_asset"),
+            "quote_asset": c.get("quote_asset"),
+            "capital": {
+                "nominal_budget_usd": cap.get("nominal_budget_usd", 0.0),
+                "committed_now_usd": cap.get("committed_now_usd", 0.0),
+                "worst_case_usd": cap.get("worst_case_usd", 0.0),
+                "utilization_now": cap.get("utilization_now", 0.0),
+            },
+            "config": {
+                "take_profit": cfg.get("take_profit", 0.0),
+                "max_active_executors_by_level": cfg.get("max_active_executors_by_level", 0),
+                "portfolio_allocation": cfg.get("portfolio_allocation", 0.0),
+            },
+            "diagnostic": {
+                "stuck_suspect": bool(diag.get("stuck_suspect", False)),
+                "active_executors": cap.get("active_executors_count", 0),
+            },
+        })
+
+    # Wallet: keep only fields used by the agent's invariants and reasoning.
+    wallet_out: dict[str, dict[str, float]] = {}
+    for asset, w in wallet_in.items():
+        if not isinstance(w, dict):
+            continue
+        wallet_out[asset] = {
+            "value_usd": float(w.get("value_usd", 0.0) or 0.0),
+            "headroom_usd": float(w.get("headroom_usd", 0.0) or 0.0),
+        }
+
+    # Totals: derived once so the agent doesn't re-aggregate.
+    headroom_total = sum(w["headroom_usd"] for w in wallet_out.values())
+    stuck_count = sum(
+        1 for c in controllers_out if c["diagnostic"]["stuck_suspect"]
+    )
+
+    return {
+        "ts": payload.get("ts"),
+        "controllers": controllers_out,
+        "wallet": wallet_out,
+        "oversub_alerts": [
+            {
+                "asset": a.get("asset"),
+                "ratio": float(a.get("ratio", 0.0) or 0.0),
+                "severity": a.get("severity"),
+                "controllers": list(a.get("controllers", []) or []),
+            }
+            for a in alerts
+        ],
+        "totals": {
+            "controllers": summary.get("total_controllers", len(controllers_out)),
+            "committed_usd": summary.get("total_committed_now_usd", 0.0),
+            "wallet_usd": summary.get("wallet_total_value_usd", 0.0),
+            "headroom_usd": headroom_total,
+            "stuck_count": stuck_count,
+        },
+    }
+
+
 def _render_monitor(payload: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("📊 *PORTFOLIO UTILIZATION*")
@@ -978,8 +1066,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     #     frontend auto-colors numeric columns (green positive, red negative).
     text = _render_compact_summary(payload)
     kpi_sections = _build_kpi_sections(payload)
+    # Two `type=data` sections — see AGENT_VS_USER_VIEW.md:
+    #   - "payload": full structured payload (CLI dashboard, debugging,
+    #     archival).
+    #   - "agent":   minimal agent-facing view (what the adaptive agent's
+    #     LLM reads — no human decorations, just the fields it queries).
     data_sections = [
         {"type": "data", "title": "payload", "data": payload},
+        {"type": "data", "title": "agent", "data": _build_agent_payload(payload)},
     ]
     table_columns, table_rows = _build_controllers_table(payload)
 
