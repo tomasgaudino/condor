@@ -16,6 +16,7 @@ from routines.capital_state import (
     _fmt_pct,
     _fmt_usd,
     _parse_pair,
+    _render_compact_summary,
     _severity,
     _split_csv,
 )
@@ -358,6 +359,58 @@ def test_summary_aggregates_totals():
     assert summary["wallet_total_value_usd"] == 10_000.0
     assert summary["any_oversub"] is False
     assert summary["max_oversub_ratio"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Compact summary (Telegram preview safety)
+# ---------------------------------------------------------------------------
+
+
+def _empty_payload() -> dict:
+    return {
+        "ts": "2026-01-01T00:00:00Z",
+        "account": "all",
+        "global": {"wallet": {}, "oversub_alerts": []},
+        "controllers": [],
+        "summary": {
+            "total_controllers": 0,
+            "total_nominal_budget_usd": 0.0,
+            "total_committed_now_usd": 0.0,
+            "total_worst_case_usd": 0.0,
+            "wallet_total_value_usd": 0.0,
+            "any_oversub": False,
+            "max_oversub_ratio": 0.0,
+        },
+    }
+
+
+def test_compact_summary_fits_telegram_preview():
+    """Compact summary must fit inside the 250-char detail-view truncation."""
+    payload = _empty_payload()
+    payload["summary"]["total_controllers"] = 42
+    payload["summary"]["total_committed_now_usd"] = 12345.67
+    payload["summary"]["total_nominal_budget_usd"] = 99999.0
+    payload["summary"]["total_worst_case_usd"] = 1_500_000.0
+    payload["summary"]["wallet_total_value_usd"] = 200_000.0
+    payload["global"]["wallet"] = {f"TKN{i}": {} for i in range(10)}
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 2.5, "severity": "crit"}
+    ]
+    text = _render_compact_summary(payload)
+    assert len(text) <= 220, f"summary too long: {len(text)} chars"
+
+
+def test_compact_summary_has_no_triple_backticks():
+    """Triple backticks would break the surrounding code fence in the UI."""
+    payload = _empty_payload()
+    text = _render_compact_summary(payload)
+    assert "```" not in text
+
+
+def test_compact_summary_helpful_when_no_controllers():
+    """Empty result must still convey something useful (not just headers)."""
+    text = _render_compact_summary(_empty_payload())
+    assert "no controllers matched" in text.lower()
 
 
 def test_summary_picks_max_oversub_ratio():
