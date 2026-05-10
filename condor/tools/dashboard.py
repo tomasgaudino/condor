@@ -137,11 +137,17 @@ async def _run_capital_state(
         target_chat_id=None,  # never send to Telegram from the CLI
     )
 
-    # The routine returns a RoutineResult whose `sections[0]` ("payload")
-    # carries the full structured payload. Fall back to text-extraction
-    # for older string-returning shapes.
+    # The routine returns a RoutineResult whose sections include both KPI
+    # cards (type="kpi") for the web UI and a data section (type="data",
+    # title="payload") with the full structured payload. We want the
+    # latter. Falls back to text-extraction for older string-returning
+    # shapes.
     result = await capital_state_run(config, context)
     if hasattr(result, "sections") and result.sections:
+        for sec in result.sections:
+            if sec.get("type") == "data" and sec.get("title") == "payload":
+                return sec["data"]
+        # Backwards compat: previous shape used title=="payload" without type
         for sec in result.sections:
             if sec.get("title") == "payload":
                 return sec["data"]

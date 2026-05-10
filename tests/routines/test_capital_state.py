@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from routines.capital_state import (
     _bar,
+    _build_controllers_table,
+    _build_kpi_sections,
     _compute_controller_block,
     _compute_global_block,
     _compute_summary,
@@ -385,15 +387,44 @@ def _empty_payload() -> dict:
     }
 
 
+def _payload_with_n_controllers(n: int, **overrides) -> dict:
+    """Build a payload with N synthetic controllers for summary tests."""
+    p = _empty_payload()
+    p["summary"]["total_controllers"] = n
+    p["controllers"] = [
+        {
+            "config_name": f"ctrl-{i}",
+            "bot_name": "bot-x",
+            "trading_pair": "BTC-USDT",
+            "diagnostic": {"stuck_suspect": False},
+            "capital": {
+                "utilization_now": 0.5,
+                "nominal_budget_usd": 30.0,
+                "committed_now_usd": 15.0,
+                "worst_case_usd": 300.0,
+                "active_executors_count": 0,
+            },
+            "config": {
+                "portfolio_allocation": 0.03,
+                "max_active_executors_by_level": 10,
+                "buy_levels": 2,
+                "sell_levels": 2,
+                "take_profit": 0.0003,
+            },
+        }
+        for i in range(n)
+    ]
+    for k, v in overrides.items():
+        p["summary"][k] = v
+    return p
+
+
 def test_compact_summary_fits_telegram_preview():
     """Compact summary must fit inside the 250-char detail-view truncation."""
-    payload = _empty_payload()
-    payload["summary"]["total_controllers"] = 42
-    payload["summary"]["total_committed_now_usd"] = 12345.67
-    payload["summary"]["total_nominal_budget_usd"] = 99999.0
-    payload["summary"]["total_worst_case_usd"] = 1_500_000.0
-    payload["summary"]["wallet_total_value_usd"] = 200_000.0
-    payload["global"]["wallet"] = {f"TKN{i}": {} for i in range(10)}
+    payload = _payload_with_n_controllers(42)
+    payload["global"]["wallet"] = {
+        f"TKN{i}": {"value_usd": 1000.0, "headroom_usd": -500.0} for i in range(10)
+    }
     payload["global"]["oversub_alerts"] = [
         {"asset": "BTC", "ratio": 2.5, "severity": "crit"}
     ]
@@ -403,7 +434,7 @@ def test_compact_summary_fits_telegram_preview():
 
 def test_compact_summary_has_no_triple_backticks():
     """Triple backticks would break the surrounding code fence in the UI."""
-    payload = _empty_payload()
+    payload = _payload_with_n_controllers(3)
     text = _render_compact_summary(payload)
     assert "```" not in text
 
@@ -414,50 +445,48 @@ def test_compact_summary_helpful_when_no_controllers():
     assert "no controllers matched" in text.lower()
 
 
-def test_compact_summary_shows_capital_line_with_worst_in_parens():
-    payload = _empty_payload()
-    payload["summary"]["total_committed_now_usd"] = 72_000.0
-    payload["summary"]["total_nominal_budget_usd"] = 95_000.0
-    payload["summary"]["total_worst_case_usd"] = 141_400.0
-    text = _render_compact_summary(payload)
-    # New format: committed / nominal nominal (worst-case ...)
-    assert "nominal" in text.lower()
-    assert "worst-case" in text.lower()
-    # Worst should be parenthesized, not the main figure
-    assert "(worst-case" in text
-
-
-def test_compact_summary_shows_headroom_when_oversub():
-    payload = _empty_payload()
-    payload["summary"]["wallet_total_value_usd"] = 10_000.0
+def test_compact_summary_shows_controller_count_and_headroom():
+    """The one-line format leads with controller count and headroom."""
+    payload = _payload_with_n_controllers(14)
     payload["global"]["wallet"] = {
-        "BTC": {"value_usd": 6000.0, "headroom_usd": 1500.0},
-        "USDT": {"value_usd": 4000.0, "headroom_usd": 500.0},
+        "BTC": {"value_usd": 50000.0, "headroom_usd": 1000.0},
+        "USDT": {"value_usd": 23000.0, "headroom_usd": -1200.0},
     }
-    payload["global"]["oversub_alerts"] = [
-        {"asset": "BTC", "ratio": 1.2, "severity": "warn"}
-    ]
     text = _render_compact_summary(payload)
+    assert "14 ctrl" in text
     assert "headroom" in text.lower()
+    # Headroom is summed across assets: 1000 + (-1200) = -200
+    assert "-" in text  # negative headroom is rendered
 
 
-def test_compact_summary_omits_worst_line_for_warn_only():
-    """warn severity is implicit in the alerts header — no extra WORST line."""
-    payload = _empty_payload()
+def test_compact_summary_includes_stuck_count_when_present():
+    payload = _payload_with_n_controllers(3)
+    payload["controllers"][0]["diagnostic"]["stuck_suspect"] = True
+    payload["controllers"][2]["diagnostic"]["stuck_suspect"] = True
+    text = _render_compact_summary(payload)
+    assert "2 stuck?" in text
+
+
+def test_compact_summary_omits_stuck_when_zero():
+    payload = _payload_with_n_controllers(3)
+    text = _render_compact_summary(payload)
+    assert "stuck" not in text.lower()
+
+
+def test_compact_summary_includes_alert_count_when_present():
+    payload = _payload_with_n_controllers(3)
     payload["global"]["oversub_alerts"] = [
-        {"asset": "BTC", "ratio": 1.2, "severity": "warn"}
+        {"asset": "BTC", "ratio": 1.5, "severity": "warn"},
+        {"asset": "USDT", "ratio": 2.5, "severity": "crit"},
     ]
     text = _render_compact_summary(payload)
-    assert "WORST:" not in text
+    assert "2 alerts" in text
 
 
-def test_compact_summary_shows_worst_line_for_crit():
-    payload = _empty_payload()
-    payload["global"]["oversub_alerts"] = [
-        {"asset": "BTC", "ratio": 2.0, "severity": "crit"}
-    ]
+def test_compact_summary_omits_alerts_segment_when_zero():
+    payload = _payload_with_n_controllers(3)
     text = _render_compact_summary(payload)
-    assert "WORST:" in text
+    assert "alert" not in text.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -575,3 +604,170 @@ def test_controller_block_falls_back_to_current_value_when_amount_zero():
     perf = {"positions_summary": [{"current_value": 42.0}]}
     block = _compute_controller_block("bot", "ctrl", cfg, perf)
     assert abs(block["capital"]["committed_now_usd"] - 42.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# stuck_suspect heuristic
+# ---------------------------------------------------------------------------
+
+
+def test_stuck_suspect_true_when_tight_tp_and_position_in_profit():
+    """take_profit ≤ 5bps + at least one position at/above breakeven."""
+    cfg = _sample_cfg(take_profit=0.0001)  # 1bp — ultra tight
+    perf = {
+        "positions_summary": [
+            {
+                "amount": 0.01,
+                "breakeven_price": 80000.0,
+                "unrealized_pnl_quote": 5.0,  # in profit, hasn't closed
+            }
+        ]
+    }
+    block = _compute_controller_block("bot", "ctrl", cfg, perf)
+    assert block["diagnostic"]["stuck_suspect"] is True
+    assert block["diagnostic"]["positions_at_or_above_breakeven"] == 1
+
+
+def test_stuck_suspect_false_when_position_underwater():
+    cfg = _sample_cfg(take_profit=0.0001)
+    perf = {
+        "positions_summary": [
+            {
+                "amount": 0.01,
+                "breakeven_price": 80000.0,
+                "unrealized_pnl_quote": -3.0,  # underwater — TP was never hit
+            }
+        ]
+    }
+    block = _compute_controller_block("bot", "ctrl", cfg, perf)
+    assert block["diagnostic"]["stuck_suspect"] is False
+
+
+def test_stuck_suspect_false_when_tp_is_relaxed():
+    cfg = _sample_cfg(take_profit=0.001)  # 10bp — comfortable
+    perf = {
+        "positions_summary": [
+            {"amount": 0.01, "breakeven_price": 80000.0, "unrealized_pnl_quote": 5.0}
+        ]
+    }
+    block = _compute_controller_block("bot", "ctrl", cfg, perf)
+    assert block["diagnostic"]["stuck_suspect"] is False
+
+
+def test_stuck_suspect_false_when_no_positions():
+    cfg = _sample_cfg(take_profit=0.0001)
+    block = _compute_controller_block("bot", "ctrl", cfg, None)
+    assert block["diagnostic"]["stuck_suspect"] is False
+
+
+# ---------------------------------------------------------------------------
+# KPI sections — for the web UI's KpiBar component
+# ---------------------------------------------------------------------------
+
+
+def test_kpi_sections_contain_four_cards():
+    payload = _payload_with_n_controllers(3)
+    kpis = _build_kpi_sections(payload)
+    labels = [k["label"] for k in kpis]
+    assert labels == ["CONTROLLERS", "CAPITAL", "HEADROOM", "ALERTS"]
+
+
+def test_kpi_sections_all_have_kpi_type():
+    payload = _payload_with_n_controllers(3)
+    for k in _build_kpi_sections(payload):
+        assert k["type"] == "kpi"
+
+
+def test_kpi_sections_negative_headroom_marks_trend_down():
+    payload = _payload_with_n_controllers(3)
+    payload["global"]["wallet"] = {
+        "BTC": {"value_usd": 1000.0, "headroom_usd": -500.0},
+    }
+    kpis = _build_kpi_sections(payload)
+    headroom_kpi = next(k for k in kpis if k["label"] == "HEADROOM")
+    assert headroom_kpi["trend"] == "down"
+    assert "over-committed" in headroom_kpi["delta"].lower()
+
+
+def test_kpi_sections_alerts_card_shows_worst_when_present():
+    payload = _payload_with_n_controllers(2)
+    payload["global"]["oversub_alerts"] = [
+        {"asset": "BTC", "ratio": 1.5, "severity": "warn"},
+        {"asset": "USDT", "ratio": 2.7, "severity": "crit"},
+    ]
+    kpis = _build_kpi_sections(payload)
+    alerts_kpi = next(k for k in kpis if k["label"] == "ALERTS")
+    assert alerts_kpi["value"] == "2 oversub"
+    assert "USDT" in alerts_kpi["delta"]  # the worst one
+    assert alerts_kpi["trend"] == "down"  # has crit
+
+
+def test_kpi_sections_alerts_card_clean_when_no_alerts():
+    payload = _payload_with_n_controllers(2)
+    kpis = _build_kpi_sections(payload)
+    alerts_kpi = next(k for k in kpis if k["label"] == "ALERTS")
+    assert alerts_kpi["value"] == "0"
+    assert alerts_kpi["trend"] == "up"
+
+
+def test_kpi_sections_capital_card_marks_trend_down_above_nominal():
+    payload = _payload_with_n_controllers(1)
+    payload["summary"]["total_committed_now_usd"] = 200.0
+    payload["summary"]["total_nominal_budget_usd"] = 100.0  # 200% of nominal
+    kpis = _build_kpi_sections(payload)
+    cap_kpi = next(k for k in kpis if k["label"] == "CAPITAL")
+    assert cap_kpi["trend"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# Controllers table — for the web UI's table renderer
+# ---------------------------------------------------------------------------
+
+
+def test_controllers_table_columns_are_stable():
+    payload = _payload_with_n_controllers(2)
+    cols, _rows = _build_controllers_table(payload)
+    expected = ["controller", "bot", "pair", "committed", "nominal",
+                "util%", "tp_bps", "pos", "flag"]
+    assert cols == expected
+
+
+def test_controllers_table_one_row_per_controller():
+    payload = _payload_with_n_controllers(5)
+    _cols, rows = _build_controllers_table(payload)
+    assert len(rows) == 5
+
+
+def test_controllers_table_sorted_by_utilization_descending():
+    payload = _payload_with_n_controllers(3)
+    payload["controllers"][0]["capital"]["utilization_now"] = 0.2
+    payload["controllers"][1]["capital"]["utilization_now"] = 0.9
+    payload["controllers"][2]["capital"]["utilization_now"] = 0.5
+    _cols, rows = _build_controllers_table(payload)
+    utils = [r["util%"] for r in rows]
+    assert utils == sorted(utils, reverse=True)
+
+
+def test_controllers_table_renders_tp_in_bps():
+    """take_profit is a fraction (0.0003 = 3bp). Table column shows bps."""
+    payload = _payload_with_n_controllers(1)
+    payload["controllers"][0]["config"]["take_profit"] = 0.0003
+    _cols, rows = _build_controllers_table(payload)
+    assert rows[0]["tp_bps"] == 3.0
+
+
+def test_controllers_table_flag_set_for_stuck_suspect():
+    payload = _payload_with_n_controllers(2)
+    payload["controllers"][0]["diagnostic"]["stuck_suspect"] = True
+    payload["controllers"][1]["diagnostic"]["stuck_suspect"] = False
+    _cols, rows = _build_controllers_table(payload)
+    # Sorted by util% — both 50% by default — order may not match input.
+    flags = sorted(r["flag"] for r in rows)
+    assert flags == ["", "stuck?"]
+
+
+def test_controllers_table_handles_empty():
+    payload = _empty_payload()
+    cols, rows = _build_controllers_table(payload)
+    assert rows == []
+    assert len(cols) > 0  # columns are stable even with no rows

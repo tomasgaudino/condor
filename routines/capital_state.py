@@ -181,6 +181,7 @@ def _compute_controller_block(
     # older Hummingbot versions that serialise the field differently.
     committed_now_usd = 0.0
     active_executors_count = 0
+    positions_at_or_above_breakeven = 0
     if perf is not None:
         positions_summary = perf.get("positions_summary") or []
         for p in positions_summary:
@@ -190,7 +191,21 @@ def _compute_controller_block(
                 notional = amount * breakeven
                 # Fall back to current_value if notional is zero (older HB versions)
                 committed_now_usd += notional if notional > 0 else float(p.get("current_value", 0) or 0)
+                # Position at/above breakeven would have triggered TP if TP wasn't too tight.
+                if float(p.get("unrealized_pnl_quote", 0) or 0) >= 0:
+                    positions_at_or_above_breakeven += 1
         active_executors_count = len(positions_summary)
+
+    # Heuristic: a controller is "possibly stuck" when its take_profit is
+    # ultra-tight (≤ 5 bps) AND it has a position at or above breakeven that
+    # nevertheless hasn't closed.  False positives possible — leading "?" in
+    # the flag name keeps it tentative.
+    take_profit = float(cfg.get("take_profit", 0) or 0)
+    stuck_suspect = (
+        take_profit > 0
+        and take_profit <= 0.0005
+        and positions_at_or_above_breakeven > 0
+    )
 
     utilization_now = (
         committed_now_usd / nominal_budget_usd if nominal_budget_usd > 0 else 0.0
@@ -225,6 +240,7 @@ def _compute_controller_block(
             "max_active_executors_by_level": max_executors,
             "buy_levels": buy_levels,
             "sell_levels": sell_levels,
+            "take_profit": take_profit,
         },
         "capital": {
             "nominal_budget_usd": nominal_budget_usd,
@@ -233,6 +249,10 @@ def _compute_controller_block(
             "utilization_now": utilization_now,
             "utilization_vs_worst": utilization_vs_worst,
             "active_executors_count": active_executors_count,
+        },
+        "diagnostic": {
+            "stuck_suspect": stuck_suspect,
+            "positions_at_or_above_breakeven": positions_at_or_above_breakeven,
         },
         "inventory": {
             "current_base_pct": current_base_pct,
@@ -420,54 +440,156 @@ def _compute_summary(controllers: list[dict], global_block: dict, wallet_total: 
 
 
 def _render_compact_summary(payload: dict[str, Any]) -> str:
-    """Short ASCII summary for the Telegram preview (must fit in ~220 chars).
+    """One-line ASCII summary for the Telegram preview (≤ 220 chars).
 
     Designed to be safe inside a triple-backtick code fence: no backticks,
-    no markdown chars that need escaping. Useful even when controllers/wallet
-    are empty (won't dump just headers like the full monitor render does).
+    no markdown chars that need escaping. The detailed view (per-controller
+    table + KPI cards) lives in `sections` / `table_data` for the web UI.
     """
     summary = payload.get("summary", {})
     wallet = payload.get("global", {}).get("wallet", {})
     alerts = payload.get("global", {}).get("oversub_alerts", [])
     controllers = payload.get("controllers", [])
 
-    lines: list[str] = []
-    lines.append(
-        f"Controllers: {summary.get('total_controllers', 0)} | "
-        f"Alerts: {len(alerts)}"
-    )
-    lines.append(
-        f"Capital: {_fmt_usd(summary.get('total_committed_now_usd', 0.0))} / "
-        f"{_fmt_usd(summary.get('total_nominal_budget_usd', 0.0))} nominal "
-        f"(worst-case {_fmt_usd(summary.get('total_worst_case_usd', 0.0))})"
-    )
+    if not controllers:
+        return "(no controllers matched filter)"
 
+    headroom = sum(
+        float(w.get("headroom_usd", 0.0) or 0.0) for w in wallet.values()
+    )
+    stuck = sum(
+        1 for c in controllers if c.get("diagnostic", {}).get("stuck_suspect")
+    )
+    parts = [
+        f"{summary.get('total_controllers', 0)} ctrl",
+        f"headroom {_fmt_usd(headroom)}",
+        f"{stuck} stuck?" if stuck else None,
+        f"{len(alerts)} alerts" if alerts else None,
+    ]
+    return " · ".join(p for p in parts if p)
+
+
+def _build_kpi_sections(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """KPI cards for the web dashboard (rendered as KpiBar in the frontend).
+
+    Returns a list of ``{"type": "kpi", "label", "value", "delta", "trend"}``
+    entries. ``trend`` is one of ``"up" | "down" | None`` and drives the
+    delta colour (green/red/neutral) in the UI.
+    """
+    summary = payload.get("summary", {})
+    wallet = payload.get("global", {}).get("wallet", {})
+    alerts = payload.get("global", {}).get("oversub_alerts", [])
+    controllers = payload.get("controllers", [])
+
+    total_ctrl = summary.get("total_controllers", 0)
+    stuck = sum(
+        1 for c in controllers if c.get("diagnostic", {}).get("stuck_suspect")
+    )
+    committed = summary.get("total_committed_now_usd", 0.0)
+    nominal = summary.get("total_nominal_budget_usd", 0.0)
+    nominal_ratio = (committed / nominal) if nominal > 0 else 0.0
+    headroom = sum(
+        float(w.get("headroom_usd", 0.0) or 0.0) for w in wallet.values()
+    )
     wallet_total = summary.get("wallet_total_value_usd", 0.0)
-    has_oversub = bool(alerts)
-    if has_oversub:
-        # Surface wallet headroom (supply minus used_now across all assets).
-        headroom = sum(
-            float(w.get("headroom_usd", 0.0) or 0.0) for w in wallet.values()
-        )
-        lines.append(
-            f"Wallet: {_fmt_usd(wallet_total)} total · "
-            f"headroom: {_fmt_usd(headroom)}"
-        )
-    else:
-        lines.append(
-            f"Wallet total: {_fmt_usd(wallet_total)} ({len(wallet)} assets)"
-        )
+    alert_count = len(alerts)
+    crit_alerts = [a for a in alerts if a.get("severity") == "crit"]
 
+    def _kpi(label: str, value: str, delta: str | None = None,
+             trend: str | None = None) -> dict[str, Any]:
+        out = {"type": "kpi", "label": label, "value": value}
+        if delta is not None:
+            out["delta"] = delta
+        if trend is not None:
+            out["trend"] = trend
+        return out
+
+    kpis: list[dict[str, Any]] = []
+    kpis.append(_kpi(
+        label="CONTROLLERS",
+        value=str(total_ctrl),
+        delta=f"{stuck} stuck?" if stuck else None,
+        trend="down" if stuck else None,
+    ))
+    kpis.append(_kpi(
+        label="CAPITAL",
+        value=_fmt_usd(committed),
+        delta=f"{_fmt_pct(nominal_ratio)} nominal",
+        trend="down" if nominal_ratio > 1.0 else None,
+    ))
+    kpis.append(_kpi(
+        label="HEADROOM",
+        value=_fmt_usd(headroom),
+        delta=(
+            f"of {_fmt_usd(wallet_total)} wallet"
+            if headroom >= 0
+            else "wallet over-committed"
+        ),
+        trend="down" if headroom < 0 else None,
+    ))
     if alerts:
         worst = max(alerts, key=lambda a: a.get("ratio", 0))
-        if worst.get("severity") == "crit":
-            lines.append(
-                f"WORST: {worst.get('asset','?')} {worst.get('ratio',0):.2f}x "
+        kpis.append(_kpi(
+            label="ALERTS",
+            value=f"{alert_count} oversub",
+            delta=(
+                f"{worst.get('asset','?')} {worst.get('ratio',0):.1f}× "
                 f"({worst.get('severity','?')})"
-            )
-    elif not controllers:
-        lines.append("(no controllers matched filter)")
-    return "\n".join(lines)
+            ),
+            trend="down" if crit_alerts else None,
+        ))
+    else:
+        kpis.append(_kpi(label="ALERTS", value="0", delta="all clear", trend="up"))
+
+    return kpis
+
+
+def _build_controllers_table(
+    payload: dict[str, Any],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Table of one row per controller for the web dashboard.
+
+    Returns ``(columns, rows)``. Numeric columns get auto-coloured by the
+    frontend (green positive / red negative). Sorted by utilization
+    descending so the worst controllers are at the top.
+
+    Columns chosen to fit the most actionable signals in one row.  Bot is
+    included because users may run multiple bots; if the user later
+    decides it's redundant we can drop it.
+    """
+    columns = [
+        "controller",
+        "bot",
+        "pair",
+        "committed",
+        "nominal",
+        "util%",
+        "tp_bps",
+        "pos",
+        "flag",
+    ]
+    rows: list[dict[str, Any]] = []
+    for c in payload.get("controllers", []):
+        cap = c.get("capital", {})
+        cfg = c.get("config", {})
+        diag = c.get("diagnostic", {})
+        # take_profit is a fraction (0.0001 = 1bp); render as basis points
+        # so values fit in a narrow column.
+        tp_bps = round(float(cfg.get("take_profit", 0) or 0) * 10000, 2)
+        rows.append({
+            "controller": c.get("config_name", "?"),
+            "bot": c.get("bot_name", "?"),
+            "pair": c.get("trading_pair", "?"),
+            "committed": round(float(cap.get("committed_now_usd", 0)), 2),
+            "nominal": round(float(cap.get("nominal_budget_usd", 0)), 2),
+            "util%": round(float(cap.get("utilization_now", 0)) * 100, 1),
+            "tp_bps": tp_bps,
+            "pos": int(cap.get("active_executors_count", 0)),
+            "flag": "stuck?" if diag.get("stuck_suspect") else "",
+        })
+
+    rows.sort(key=lambda r: r.get("util%", 0), reverse=True)
+    return columns, rows
 
 
 def _render_monitor(payload: dict[str, Any]) -> str:
@@ -636,26 +758,30 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             logger.error("Failed to send monitor: %s", e)
 
     # Build the routine result.
-    #   - `text` is ONLY the compact summary: short enough to render
-    #     cleanly in the Telegram detail-view's 250-char truncation, and
-    #     free of triple-backticks that would break the surrounding code
-    #     fence inserted by the routines handler.
-    #   - `sections` carries the structured payload for the web dashboard
-    #     and for programmatic consumers (e.g. condor/tools/dashboard.py),
-    #     which read `result.sections[0]["data"]` for the full payload
-    #     instead of regex-extracting JSON from text.
+    #   - `text` is a one-line summary for the Telegram preview (≤ 220 chars,
+    #     safe inside the handler's MarkdownV2 code fence).
+    #   - `sections` carries:
+    #       * KPI cards (type="kpi") rendered as a card row by the frontend.
+    #       * The full structured payload (type="data") for programmatic
+    #         consumers (CLI dashboard, agent engine, etc.). The frontend
+    #         currently filters sections by type=="kpi", so the data section
+    #         is invisible in the UI but available via /api.
+    #   - `table_data` + `table_columns` render as a real HTML table in the
+    #     web UI (one row per controller, sorted by utilization). The
+    #     frontend auto-colors numeric columns (green positive, red negative).
     text = _render_compact_summary(payload)
-
-    sections = [
-        {"title": "payload", "data": payload},
-        {"title": "summary", "data": payload.get("summary", {})},
-        {"title": "wallet", "data": payload.get("global", {}).get("wallet", {})},
-        {"title": "oversub_alerts",
-         "data": payload.get("global", {}).get("oversub_alerts", [])},
-        {"title": "controllers", "data": payload.get("controllers", [])},
+    kpi_sections = _build_kpi_sections(payload)
+    data_sections = [
+        {"type": "data", "title": "payload", "data": payload},
     ]
+    table_columns, table_rows = _build_controllers_table(payload)
 
-    return RoutineResult(text=text, sections=sections)
+    return RoutineResult(
+        text=text,
+        sections=kpi_sections + data_sections,
+        table_data=table_rows,
+        table_columns=table_columns,
+    )
 
 
 def _utc_iso() -> str:
