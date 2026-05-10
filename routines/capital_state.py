@@ -19,7 +19,6 @@ That comes in a follow-up commit.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -27,6 +26,7 @@ from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
 from config_manager import get_client
+from routines.base import RoutineResult
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +360,43 @@ def _compute_summary(controllers: list[dict], global_block: dict, wallet_total: 
 # ---------------------------------------------------------------------------
 
 
+def _render_compact_summary(payload: dict[str, Any]) -> str:
+    """Short ASCII summary for the Telegram preview (must fit in ~220 chars).
+
+    Designed to be safe inside a triple-backtick code fence: no backticks,
+    no markdown chars that need escaping. Useful even when controllers/wallet
+    are empty (won't dump just headers like the full monitor render does).
+    """
+    summary = payload.get("summary", {})
+    wallet = payload.get("global", {}).get("wallet", {})
+    alerts = payload.get("global", {}).get("oversub_alerts", [])
+    controllers = payload.get("controllers", [])
+
+    lines: list[str] = []
+    lines.append(
+        f"Controllers: {summary.get('total_controllers', 0)} | "
+        f"Alerts: {len(alerts)}"
+    )
+    lines.append(
+        f"Committed: {_fmt_usd(summary.get('total_committed_now_usd', 0.0))} / "
+        f"Nominal: {_fmt_usd(summary.get('total_nominal_budget_usd', 0.0))} / "
+        f"Worst: {_fmt_usd(summary.get('total_worst_case_usd', 0.0))}"
+    )
+    lines.append(
+        f"Wallet total: {_fmt_usd(summary.get('wallet_total_value_usd', 0.0))} "
+        f"({len(wallet)} assets)"
+    )
+    if alerts:
+        worst = max(alerts, key=lambda a: a.get("ratio", 0))
+        lines.append(
+            f"WORST: {worst.get('asset','?')} {worst.get('ratio',0):.2f}x "
+            f"({worst.get('severity','?')})"
+        )
+    elif not controllers:
+        lines.append("(no controllers matched filter)")
+    return "\n".join(lines)
+
+
 def _render_monitor(payload: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("📊 *PORTFOLIO UTILIZATION*")
@@ -483,7 +520,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         "summary": summary,
     }
 
-    # Send compact monitor to target chat if requested
+    # Send compact monitor to target chat if requested (separate channel —
+    # full monitor render goes here without conflicting with the routine
+    # handler's own truncated preview).
     if config.target_chat_id and context.bot is not None:
         text = _render_monitor(payload)
         try:
@@ -495,9 +534,27 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         except Exception as e:
             logger.error("Failed to send monitor: %s", e)
 
-    # Return both: human-readable monitor + JSON for programmatic callers
-    monitor_text = _render_monitor(payload)
-    return monitor_text + "\n\n```json\n" + json.dumps(payload, indent=2) + "\n```"
+    # Build the routine result.
+    #   - `text` is ONLY the compact summary: short enough to render
+    #     cleanly in the Telegram detail-view's 250-char truncation, and
+    #     free of triple-backticks that would break the surrounding code
+    #     fence inserted by the routines handler.
+    #   - `sections` carries the structured payload for the web dashboard
+    #     and for programmatic consumers (e.g. condor/tools/dashboard.py),
+    #     which read `result.sections[0]["data"]` for the full payload
+    #     instead of regex-extracting JSON from text.
+    text = _render_compact_summary(payload)
+
+    sections = [
+        {"title": "payload", "data": payload},
+        {"title": "summary", "data": payload.get("summary", {})},
+        {"title": "wallet", "data": payload.get("global", {}).get("wallet", {})},
+        {"title": "oversub_alerts",
+         "data": payload.get("global", {}).get("oversub_alerts", [])},
+        {"title": "controllers", "data": payload.get("controllers", [])},
+    ]
+
+    return RoutineResult(text=text, sections=sections)
 
 
 def _utc_iso() -> str:
