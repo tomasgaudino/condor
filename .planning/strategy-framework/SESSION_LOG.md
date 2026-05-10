@@ -16,7 +16,7 @@
 
 ---
 
-## 2026-05-10 · Cierre del primer slice de capital_state end-to-end
+## 2026-05-10 · capital_state end-to-end + sistema de supervivencia entre sesiones
 
 **Contexto inicial**: arrancamos el día con el diseño completo (15 specs)
 y el primer commit de `capital_state.py` ya hecho la sesión anterior.
@@ -84,6 +84,31 @@ producción** (server `brigado`, 14 controllers reales) y la convención
      consultan. Documentado como contrato vivo en
      `AGENT_VS_USER_VIEW.md`.
 
+9. **Sistema de supervivencia entre sesiones** (commits `a36e516`,
+   `c8c952c`, `383718b`).
+   - Pregunta del usuario al cierre: "¿cómo me aseguro de que mañana
+     hagamos exactamente este mismo proceso?". Identificamos que el
+     contexto interpretativo (no las specs, que ya sobreviven en disco)
+     se perdía entre sesiones.
+   - Solución de tres comandos:
+     * `/onboard` — protocolo de arranque determinístico (lee
+       LEARNINGS, último SESSION_LOG, TASKS, verifica git/tests,
+       detecta gaps si la sesión anterior cerró sin handoff).
+     * `/avance` (extendido) — incluye recordatorio activo apuntando
+       a `/handoff` cuando detecta cierre próximo.
+     * `/handoff` — ritual de cierre que automatiza la metadata
+       determinística (commits del día, status, tests) y solo pide
+       al humano las 3 cosas interpretativas (decisiones, fricciones,
+       "para retomar mañana"). Persiste y pushea a `drupman`.
+   - `SESSION_LOG.md` introducido como bitácora cronológica
+     append-only, una entrada por sesión productiva.
+
+10. **Remote `drupman` agregado y push inicial** (operación, sin commit).
+    - `drupman` → `https://github.com/tomasgaudino/condor` (fork del
+      usuario). Branch `feat/pmm_mister_supervisor` ahora respaldada
+      ahí y el upstream local apunta a `drupman` para que `git push`
+      futuros vayan al fork por defecto, no al `origin/hummingbot`.
+
 ### Decisiones operativas
 
 - **`controller_id` canónico** = `{bot_name}::{_config_name}`. Era ambiguo
@@ -120,20 +145,32 @@ producción** (server `brigado`, 14 controllers reales) y la convención
 - "Lo que ves vos no es lo que veo yo" — yo asumía Telegram como UI principal cuando él tenía la web abierta.
 - "¿Vos tenés un learnings propio?" — la pregunta que originó este sistema.
 
-### Estado al cerrar (snapshot 22:30 ART)
+### Estado al cerrar (snapshot final del día)
 
-- Branch: `feat/pmm_mister_supervisor` (no mergeada, no pusheada).
-- Tests: **136/136 pasan** en 0.32s.
-- Commits: 27 atómicos (incluyendo los 7 de docs/planning).
-- `capital_state` end-to-end funcionando en producción contra `brigado`.
-  - 1 línea para Telegram preview.
-  - HTML report con KPIs + narrativa + glosario + tabla en pantalla web nueva.
-  - Agent view en `sections[type=data, title=agent]` listo para consumir.
-  - CLI dashboard sigue funcionando.
-- Specs: 21 docs en `.planning/strategy-framework/` (incluyendo el nuevo
-  `AGENT_VS_USER_VIEW.md`).
+- Branch: `feat/pmm_mister_supervisor` (no mergeada, **pusheada a
+  `drupman`** que es el fork del usuario en
+  `github.com/tomasgaudino/condor`).
+- Tests: **136/136 pasan** en 0.33s.
+- Commits del día: **36 atómicos** (todos en la branch).
+- `capital_state` end-to-end funcionando en producción contra
+  `brigado` (server con 14 controllers `pmm_mister`):
+  - 1 línea ASCII para Telegram preview.
+  - HTML report (`ReportBuilder`) con KPIs + narrativa determinística
+    en español + glosario contextual + tabla en la pantalla web nueva.
+  - Agent view en `sections[type=data, title=agent]` (~5 KB) listo
+    para consumir por el engine del agente cuando se construya.
+  - CLI dashboard (`python -m condor.tools.dashboard`) sigue
+    funcionando vía la sección de payload completo.
+- Specs: 22 docs en `.planning/strategy-framework/` (incluyendo
+  `SESSION_LOG.md` y `AGENT_VS_USER_VIEW.md` nuevos).
+- Tooling Claude: 3 slash commands (`/onboard`, `/avance`,
+  `/handoff`) + 1 skill (`condor-express`).
 
 ### Para retomar mañana
+
+**Primer paso al arrancar**: invocar `/onboard`. Va a leer
+LEARNINGS.md, esta entrada, TASKS.md, verificar git status y tests.
+Sale en <2 minutos con un reporte de contexto cargado.
 
 **Punto natural de continuación**: Fase 1.2 — `routines/market_regime.py`.
 Ya tiene spec completa en `MARKET_REGIME_SPEC.md`.
@@ -143,7 +180,7 @@ Antes de implementar, **leer obligatoriamente**:
 2. Última entrada de `SESSION_LOG.md` (esta misma).
 3. `AGENT_VS_USER_VIEW.md` — armar la sección de `market_regime` ahí
    ANTES de codear (regla establecida hoy: documentar el contrato
-   primero, después implementar).
+   de las dos vistas primero, después implementar).
 4. `MARKET_REGIME_SPEC.md` para el qué.
 
 **Validación recomendada antes de implementar**: usar `condor-express`
@@ -154,9 +191,14 @@ asumir desde la spec, validar desde código real (LEARNINGS L4).
 **Riesgo operacional pendiente**: el wallet de `brigado` está al 97% de
 utilización con headroom $-203. El framework está mostrando un setup
 agresivo (14 controllers operando 7× nominal con TP de 1bp). Vale la
-pena mencionarle al usuario antes de seguir construyendo encima — si
-los controllers se claven hoy, no es bug del framework, es la realidad
-de su setup actual.
+pena mencionárselo al usuario al arrancar — si los controllers se
+claven, no es bug del framework, es la realidad de su setup actual.
+
+**Recordatorio del ritual**: al cerrar la próxima sesión, invocar
+`/handoff` para que esta misma estructura quede actualizada
+automáticamente. El sistema tolera olvido único (`/onboard` detecta
+gaps al día siguiente y reconstruye desde commits), pero el handoff
+explícito es siempre mejor.
 
 ### Commits del día (orden cronológico)
 
@@ -186,6 +228,9 @@ c170cfd  feat(routines): persist capital_state output as an HTML report
 7f4f43d  feat(routines): add narrative summary + contextual glossary to capital_state
 f924d26  feat(routines): emit a separate agent-facing payload from capital_state
 2fe8c4a  docs(planning): add AGENT_VS_USER_VIEW.md as living routine contract
+a36e516  docs(planning): start SESSION_LOG.md with today's closing entry
+c8c952c  feat(claude): add /onboard command and close-of-day reminder in /avance
+383718b  feat(claude): close the loop with /handoff and gap detection in /onboard
 ```
 
 ---
