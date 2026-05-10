@@ -2,6 +2,9 @@
 
 > Fuente de verdad del avance. Editar marcando `[x]` cuando se completa.
 > Ver detalle de decisiones en `DECISIONS.md`. Ver diseño en `DESIGN.md`.
+>
+> **⚠ LECTURA OBLIGATORIA al arranque de cada sesión sobre este
+> framework**: `LEARNINGS.md` (errores cometidos antes — no recaer).
 
 ## Convenciones
 

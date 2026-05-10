@@ -40,6 +40,14 @@ Progreso por fase:
   - <listar los .md presentes>
 ```
 
+## Antes de reportar — chequeo de salud
+
+Si esta sesión es nueva (es la primera vez que se invoca `/avance` en
+ella), **leé también** `.planning/strategy-framework/LEARNINGS.md` y
+mencioná en una línea al final del reporte algo como:
+"💡 Recordá: revisé LEARNINGS.md, X lecciones activas." Esto fuerza
+no recaer en errores ya cometidos.
+
 ## Reglas
 
 - **No** listes cada subtarea done. Solo conteo agregado.
