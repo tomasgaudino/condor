@@ -757,6 +757,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         except Exception as e:
             logger.error("Failed to send monitor: %s", e)
 
+    # Save a persistent HTML report — this is what shows up in the web UI's
+    # routine page (the "No reports yet · Run for the first time" view).
+    # Without this call, even a richly-structured RoutineResult never
+    # reaches the new reports listing (LEARNINGS.md L3).
+    try:
+        _save_report(payload)
+    except Exception as e:
+        logger.error("Failed to save report: %s", e)
+
     # Build the routine result.
     #   - `text` is a one-line summary for the Telegram preview (≤ 220 chars,
     #     safe inside the handler's MarkdownV2 code fence).
@@ -788,3 +797,103 @@ def _utc_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _save_report(payload: dict[str, Any]) -> str | None:
+    """Persist a full HTML report so the routine shows up in the web UI's
+    "Reports" listing (the new tab) — not just in the legacy instance detail.
+
+    Returns the report_id, or None if ReportBuilder is unavailable.
+    """
+    try:
+        from condor.reports import ReportBuilder
+    except Exception as e:
+        logger.warning("ReportBuilder import failed: %s", e)
+        return None
+
+    summary = payload.get("summary", {})
+    wallet = payload.get("global", {}).get("wallet", {})
+    alerts = payload.get("global", {}).get("oversub_alerts", [])
+    controllers = payload.get("controllers", [])
+
+    total_ctrl = summary.get("total_controllers", 0)
+    stuck = sum(
+        1 for c in controllers if c.get("diagnostic", {}).get("stuck_suspect")
+    )
+    headroom = sum(
+        float(w.get("headroom_usd", 0.0) or 0.0) for w in wallet.values()
+    )
+    committed = summary.get("total_committed_now_usd", 0.0)
+    nominal = summary.get("total_nominal_budget_usd", 0.0)
+
+    builder = ReportBuilder(f"Capital State — {_utc_iso()}")
+    builder.source("routine", "capital_state").tags(["adaptive_framework", "capital"])
+
+    # 4 KPI cards (same shape as the in-result kpi sections).
+    builder.kpi(
+        "Controllers",
+        str(total_ctrl),
+        delta=f"{stuck} stuck?" if stuck else None,
+        trend="down" if stuck else "neutral",
+    )
+    nominal_ratio = (committed / nominal) if nominal > 0 else 0.0
+    builder.kpi(
+        "Capital",
+        _fmt_usd(committed),
+        delta=f"{_fmt_pct(nominal_ratio)} nominal",
+        trend="down" if nominal_ratio > 1.0 else "neutral",
+    )
+    builder.kpi(
+        "Headroom",
+        _fmt_usd(headroom),
+        delta=(
+            f"of {_fmt_usd(summary.get('wallet_total_value_usd', 0.0))} wallet"
+            if headroom >= 0
+            else "wallet over-committed"
+        ),
+        trend="down" if headroom < 0 else "neutral",
+    )
+    if alerts:
+        worst = max(alerts, key=lambda a: a.get("ratio", 0))
+        builder.kpi(
+            "Alerts",
+            f"{len(alerts)} oversub",
+            delta=(
+                f"{worst.get('asset','?')} {worst.get('ratio',0):.1f}x "
+                f"({worst.get('severity','?')})"
+            ),
+            trend="down" if any(a.get("severity") == "crit" for a in alerts) else "neutral",
+        )
+    else:
+        builder.kpi("Alerts", "0", delta="all clear", trend="up")
+
+    # Wallet section
+    if wallet:
+        wallet_lines = ["## Wallet"]
+        for asset, w in sorted(wallet.items(), key=lambda kv: -kv[1].get("value_usd", 0)):
+            wallet_lines.append(
+                f"- **{asset}**: {_fmt_usd(w.get('value_usd', 0))} total · "
+                f"used {_fmt_usd(w.get('used_now_usd', 0))} · "
+                f"headroom {_fmt_usd(w.get('headroom_usd', 0))}"
+            )
+        builder.markdown("\n".join(wallet_lines))
+
+    # Oversub alerts (if any)
+    if alerts:
+        alert_lines = ["## Oversubscription alerts"]
+        for a in sorted(alerts, key=lambda x: -x.get("ratio", 0)):
+            alert_lines.append(
+                f"- **{a.get('asset','?')}**: {a.get('ratio',0):.2f}× "
+                f"({a.get('severity','?')}) — used by "
+                f"{len(a.get('controllers', []))} controller(s)"
+            )
+        builder.markdown("\n".join(alert_lines))
+
+    # Controllers table — same columns as the table_data we put in the
+    # RoutineResult, sorted by utilization desc.
+    columns, rows = _build_controllers_table(payload)
+    if rows:
+        builder.markdown("## Controllers (sorted by utilization)")
+        builder.table(rows, columns=columns)
+
+    return builder.save()
