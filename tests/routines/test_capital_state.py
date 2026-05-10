@@ -17,6 +17,7 @@ from routines.capital_state import (
     _fmt_usd,
     _parse_pair,
     _render_compact_summary,
+    _resolve_perf,
     _severity,
     _split_csv,
 )
@@ -423,3 +424,62 @@ def test_summary_picks_max_oversub_ratio():
     summary = _compute_summary([], global_block, wallet_total=0.0)
     assert summary["any_oversub"] is True
     assert summary["max_oversub_ratio"] == 1.8
+
+
+# ---------------------------------------------------------------------------
+# _resolve_perf — resilient matching of performance dict to controller config
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_perf_matches_by_config_name():
+    perf_by_id = {
+        "001_pmm_binance": {"performance": {"connector_name": "binance",
+                                              "trading_pair": "BTC-USDT",
+                                              "positions_summary": [{"current_value": 5.0}]}},
+    }
+    cfg = {"_config_name": "001_pmm_binance",
+           "connector_name": "binance",
+           "trading_pair": "BTC-USDT"}
+    out = _resolve_perf(perf_by_id, cfg)
+    assert out is not None
+    assert out["positions_summary"][0]["current_value"] == 5.0
+
+
+def test_resolve_perf_falls_back_to_connector_pair_match():
+    # Direct keys don't match — must find by (connector, pair).
+    perf_by_id = {
+        "some-uuid-xyz": {"performance": {"connector_name": "binance",
+                                            "trading_pair": "ETH-USDT",
+                                            "positions_summary": [{"current_value": 9.0}]}},
+    }
+    cfg = {"_config_name": "different_name.yml",
+           "id": "another_id",
+           "connector_name": "binance",
+           "trading_pair": "ETH-USDT"}
+    out = _resolve_perf(perf_by_id, cfg)
+    assert out is not None
+    assert out["positions_summary"][0]["current_value"] == 9.0
+
+
+def test_resolve_perf_returns_none_when_no_match():
+    perf_by_id = {
+        "x": {"performance": {"connector_name": "kucoin",
+                                "trading_pair": "SOL-USDT"}},
+    }
+    cfg = {"_config_name": "abc",
+           "connector_name": "binance",
+           "trading_pair": "BTC-USDT"}
+    assert _resolve_perf(perf_by_id, cfg) is None
+
+
+def test_resolve_perf_handles_unwrapped_entry():
+    # Some MQTT versions don't wrap under "performance".
+    perf_by_id = {
+        "ctrl-1": {"connector_name": "binance",
+                    "trading_pair": "BTC-USDT",
+                    "positions_summary": [{"current_value": 3.0}]},
+    }
+    cfg = {"_config_name": "ctrl-1"}
+    out = _resolve_perf(perf_by_id, cfg)
+    assert out is not None
+    assert out["positions_summary"][0]["current_value"] == 3.0

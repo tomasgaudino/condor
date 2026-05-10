@@ -242,6 +242,57 @@ def _compute_controller_block(
     }
 
 
+def _resolve_perf(perf_by_id: dict, cfg: dict) -> dict | None:
+    """Resolve the performance dict for a controller config.
+
+    Tries multiple key conventions before falling back to a
+    (connector_name, trading_pair) match. Hummingbot's MQTT side has been
+    observed to publish performance keyed inconsistently across versions
+    (sometimes the YAML filename, sometimes the controller id), so we
+    probe each candidate in order.
+
+    Returns the unwrapped performance dict, or None if no match.
+    """
+    if not isinstance(perf_by_id, dict) or not perf_by_id:
+        return None
+
+    def _unwrap(entry: Any) -> dict | None:
+        if isinstance(entry, dict):
+            inner = entry.get("performance", entry)
+            return inner if isinstance(inner, dict) else None
+        return None
+
+    candidates = [
+        cfg.get("_config_name"),
+        cfg.get("id"),
+        cfg.get("controller_id"),
+        cfg.get("controller_name"),
+    ]
+    for k in candidates:
+        if not k:
+            continue
+        if k in perf_by_id:
+            unwrapped = _unwrap(perf_by_id[k])
+            if unwrapped is not None:
+                return unwrapped
+
+    # Fallback: match by (connector_name, trading_pair)
+    cfg_connector = cfg.get("connector_name")
+    cfg_pair = cfg.get("trading_pair")
+    if cfg_connector and cfg_pair:
+        for entry in perf_by_id.values():
+            unwrapped = _unwrap(entry)
+            if unwrapped is None:
+                continue
+            if (
+                unwrapped.get("connector_name") == cfg_connector
+                and unwrapped.get("trading_pair") == cfg_pair
+            ):
+                return unwrapped
+
+    return None
+
+
 def _split_csv(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
@@ -488,11 +539,39 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             if not config_name:
                 continue
 
-            # Match performance by controller_id key (MQTT side may use id)
-            perf = perf_by_id.get(config_name)
-            if isinstance(perf, dict):
-                # perf may be wrapped: {"performance": {...}}
-                perf = perf.get("performance", perf)
+            # Match performance via resilient resolver — Hummingbot MQTT
+            # keys vary across versions (filename vs controller id).
+            perf = _resolve_perf(perf_by_id, cfg)
+            matched_direct = False
+            if perf is not None:
+                for k in (
+                    cfg.get("_config_name"),
+                    cfg.get("id"),
+                    cfg.get("controller_id"),
+                    cfg.get("controller_name"),
+                ):
+                    if k and k in perf_by_id:
+                        matched_direct = True
+                        break
+
+            canonical_id = f"{bot_name}::{config_name}"
+            if perf is None:
+                logger.info(
+                    "capital_state: no perf match for %s (cfg keys: "
+                    "_config_name=%s, id=%s, controller_id=%s, "
+                    "controller_name=%s, perf_keys=%s)",
+                    cfg.get("trading_pair", "?"),
+                    cfg.get("_config_name"),
+                    cfg.get("id"),
+                    cfg.get("controller_id"),
+                    cfg.get("controller_name"),
+                    list(perf_by_id.keys()) if isinstance(perf_by_id, dict) else None,
+                )
+            elif not matched_direct:
+                logger.info(
+                    "capital_state: matched via (connector, pair) fallback for %s",
+                    canonical_id,
+                )
 
             connector = cfg.get("connector_name", "")
             if connector:
