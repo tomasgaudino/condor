@@ -174,14 +174,22 @@ def _compute_controller_block(
     nominal_budget_usd = total_amount_quote * portfolio_allocation
     worst_case_usd = nominal_budget_usd * max_executors
 
-    # Committed now: from positions_summary in performance snapshot
+    # Committed now: from positions_summary in performance snapshot.
+    # Each item has: amount (base units), breakeven_price (quote per base unit),
+    # side, unrealized_pnl_quote.  Notional value = amount × breakeven_price.
+    # Fallback: try legacy `current_value` field for forward-compatibility with
+    # older Hummingbot versions that serialise the field differently.
     committed_now_usd = 0.0
     active_executors_count = 0
     if perf is not None:
         positions_summary = perf.get("positions_summary") or []
         for p in positions_summary:
             if isinstance(p, dict):
-                committed_now_usd += float(p.get("current_value", 0) or 0)
+                amount = float(p.get("amount", 0) or 0)
+                breakeven = float(p.get("breakeven_price", 0) or 0)
+                notional = amount * breakeven
+                # Fall back to current_value if notional is zero (older HB versions)
+                committed_now_usd += notional if notional > 0 else float(p.get("current_value", 0) or 0)
         active_executors_count = len(positions_summary)
 
     utilization_now = (

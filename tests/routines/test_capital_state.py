@@ -529,3 +529,49 @@ def test_summary_picks_max_oversub_ratio():
     summary = _compute_summary([], global_block, wallet_total=0.0)
     assert summary["any_oversub"] is True
     assert summary["max_oversub_ratio"] == 1.8
+
+
+# ---------------------------------------------------------------------------
+# positions_summary real shape (amount × breakeven_price)
+# ---------------------------------------------------------------------------
+
+
+def test_controller_block_committed_from_amount_times_breakeven():
+    """Real Hummingbot shape: amount (base) × breakeven_price (quote) = notional USD."""
+    cfg = _sample_cfg(total_amount_quote=7000.0, portfolio_allocation=0.03)
+    perf = {
+        "positions_summary": [
+            # BTC long: 0.001 BTC @ 80_000 USDT → $80 committed
+            {"amount": 0.001, "breakeven_price": 80_000.0, "side": "BUY",
+             "unrealized_pnl_quote": 1.5},
+        ]
+    }
+    block = _compute_controller_block("bot", "ctrl", cfg, perf)
+    cap = block["capital"]
+    assert abs(cap["committed_now_usd"] - 80.0) < 1e-6
+    assert cap["active_executors_count"] == 1
+
+
+def test_controller_block_committed_sums_multiple_positions():
+    """Multiple open positions are summed correctly."""
+    cfg = _sample_cfg(total_amount_quote=7000.0, portfolio_allocation=0.05)
+    perf = {
+        "positions_summary": [
+            {"amount": 0.001, "breakeven_price": 80_000.0, "side": "BUY",
+             "unrealized_pnl_quote": 1.0},
+            {"amount": 0.0005, "breakeven_price": 79_500.0, "side": "SELL",
+             "unrealized_pnl_quote": -0.5},
+        ]
+    }
+    block = _compute_controller_block("bot", "ctrl", cfg, perf)
+    # 0.001 × 80_000 + 0.0005 × 79_500 = 80.0 + 39.75 = 119.75
+    assert abs(block["capital"]["committed_now_usd"] - 119.75) < 1e-6
+    assert block["capital"]["active_executors_count"] == 2
+
+
+def test_controller_block_falls_back_to_current_value_when_amount_zero():
+    """Legacy shape: no amount/breakeven → fall back to current_value field."""
+    cfg = _sample_cfg()
+    perf = {"positions_summary": [{"current_value": 42.0}]}
+    block = _compute_controller_block("bot", "ctrl", cfg, perf)
+    assert abs(block["capital"]["committed_now_usd"] - 42.0) < 1e-6
