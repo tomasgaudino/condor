@@ -538,20 +538,72 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # Build per-controller blocks (filter by controller_name)
     controllers: list[dict] = []
     connector_names_seen: set[str] = set()
+    _diag_dumped_first_match = False  # [diag] dump shape only once per call
     for bot_name, cfgs in zip(bot_names, configs_per_bot):
         bot_data = bots_data.get(bot_name) or {}
         perf_by_id = bot_data.get("performance", {}) if isinstance(bot_data, dict) else {}
 
+        # [diag] high-level shape per bot
+        logger.info(
+            "[diag] bot=%s cfgs=%d bot_data_top_keys=%s perf_keys=%s",
+            bot_name,
+            len(cfgs) if isinstance(cfgs, list) else -1,
+            list(bot_data.keys()) if isinstance(bot_data, dict) else type(bot_data).__name__,
+            list(perf_by_id.keys()) if isinstance(perf_by_id, dict) else type(perf_by_id).__name__,
+        )
+
         for cfg in cfgs:
             if not isinstance(cfg, dict):
+                logger.info("[diag] skipping non-dict cfg in bot=%s: %r", bot_name, type(cfg).__name__)
                 continue
             ctrl_name = cfg.get("controller_name", "")
             if config.controller_filter and ctrl_name != config.controller_filter:
+                logger.info(
+                    "[diag] cfg filtered out: bot=%s controller_name=%r filter=%r",
+                    bot_name, ctrl_name, config.controller_filter,
+                )
                 continue
 
             config_name = cfg.get("_config_name") or cfg.get("id", "")
             if not config_name:
+                logger.info(
+                    "[diag] cfg has no config_name: bot=%s cfg_keys=%s",
+                    bot_name, list(cfg.keys()),
+                )
                 continue
+
+            # [diag] dump full shape of FIRST passing cfg + corresponding perf entry
+            if not _diag_dumped_first_match:
+                _diag_dumped_first_match = True
+                logger.info(
+                    "[diag] FIRST cfg passing filters — bot=%s config_name=%s cfg_keys=%s sample_values=%s",
+                    bot_name, config_name, list(cfg.keys()),
+                    {k: cfg.get(k) for k in ("controller_name", "controller_type", "connector_name", "trading_pair", "_config_name", "id", "controller_id")},
+                )
+                # Show what perf entries exist and their shape
+                if isinstance(perf_by_id, dict) and perf_by_id:
+                    sample_key = next(iter(perf_by_id))
+                    sample_val = perf_by_id[sample_key]
+                    if isinstance(sample_val, dict):
+                        logger.info(
+                            "[diag] FIRST perf entry — key=%s top_keys=%s perf_inner_keys=%s",
+                            sample_key,
+                            list(sample_val.keys()),
+                            list(sample_val.get("performance", {}).keys()) if isinstance(sample_val.get("performance"), dict) else "n/a",
+                        )
+                        # Show connector/pair fields if present (used by fallback match)
+                        inner = sample_val.get("performance", sample_val)
+                        if isinstance(inner, dict):
+                            logger.info(
+                                "[diag] FIRST perf entry inner connector=%r pair=%r positions_summary_len=%s",
+                                inner.get("connector_name"),
+                                inner.get("trading_pair"),
+                                len(inner.get("positions_summary") or []) if "positions_summary" in inner else "absent",
+                            )
+                    else:
+                        logger.info("[diag] FIRST perf entry not a dict: type=%s", type(sample_val).__name__)
+                else:
+                    logger.info("[diag] perf_by_id empty or not dict")
 
             # Match performance via resilient resolver — Hummingbot MQTT
             # keys vary across versions (filename vs controller id).
