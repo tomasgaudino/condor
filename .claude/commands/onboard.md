@@ -38,6 +38,25 @@ Ejecutalo **en orden**, sin saltar pasos:
    Confirmar que todos pasan. Si no pasan, **eso es lo primero a
    resolver**, no avanzar a feature nuevo.
 
+6. **Detectar gaps en SESSION_LOG**: comparar la fecha de la última
+   entrada de SESSION_LOG.md con los commits que hubo después.
+   ```bash
+   # Fecha de la última entrada (línea tipo "## YYYY-MM-DD ...")
+   head -30 .planning/strategy-framework/SESSION_LOG.md | grep -m1 '^## 20'
+
+   # Commits desde esa fecha
+   git log --oneline --since="<fecha del log>" feat/pmm_mister_supervisor
+   ```
+   - Si hay commits sin entry de log correspondiente, **avisar al
+     usuario** en el reporte:
+     > "⚠️ Hubo trabajo entre <fecha del último log> y ahora sin entrada
+     > en SESSION_LOG. Puedo reconstruir un resumen aproximado leyendo
+     > los commits, pero la parte interpretativa (fricciones, próximos
+     > pasos) se perdió. ¿Querés que arme un draft de la entrada
+     > faltante con `git log` y diffs?"
+   - Esto cubre el caso de sesiones que se cerraron sin invocar
+     `/handoff`.
+
 ## Reportar al usuario
 
 Después de leer todo, devolvele un resumen conciso en este formato:

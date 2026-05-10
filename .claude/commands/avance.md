@@ -50,22 +50,21 @@ no recaer en errores ya cometidos.
 
 ## Cierre del día — recordatorio de handoff
 
-Al final del reporte, agregá siempre este bloque (1 línea cada uno):
+Al final del reporte, agregá siempre este bloque:
 
 ```
-💾 ¿Cerrando la sesión hoy? Recordá:
-  1. Agregar entrada nueva arriba en SESSION_LOG.md (resumen +
-     fricciones + "para retomar mañana"). Mientras el contexto está
-     fresco — yo no me voy a acordar mañana.
-  2. ¿Hay alguna lección nueva que registrar en LEARNINGS.md? Mejor
-     tres líneas hoy que media hora redescubriendo el error mañana.
-  3. Considerar push de `feat/pmm_mister_supervisor` si querés que
-     sobreviva por si el filesystem local falla.
+💾 ¿Vas a cerrar la sesión pronto? Invocá /handoff y yo me ocupo del
+ritual completo: borrador de SESSION_LOG con los commits del día,
+recolección de fricciones/lecciones, commit y push a drupman.
 ```
 
-El usuario decide si actuar o no — pero el recordatorio aparece
-siempre. Si la última entrada de `SESSION_LOG.md` ya es de hoy, decir
-"última entrada del log ya es de hoy, listo" en lugar del bloque.
+Si la fecha de la última entrada de `SESSION_LOG.md` ya es de hoy y
+NO hay commits posteriores, decir "última entrada del log ya es de
+hoy y al día, listo" en lugar del bloque.
+
+Si la última entrada es de hoy pero hubo commits posteriores, decir:
+"última entrada de SESSION_LOG es de hoy pero hubo trabajo después.
+`/handoff` puede actualizarla con lo nuevo."
 
 ## Reglas
 
