@@ -276,6 +276,45 @@ abortara al fallar la validación, el agente no podría escribir nada.
 
 ---
 
+### L12 — Backtest endpoint también rechaza `_config_name` y responde error con HTTP 200 (2026-05-12)
+
+**Qué pasó.** Durante el smoke E2E de Fase 5.7, el `backtest_loop`
+mandaba el config completo (tal como vino de `get_bot_controller_configs`)
+al endpoint `/run-backtesting`. El response fue `{"error": "..."}` con
+HTTP 200, no excepción.
+
+Dos cosas pasaron al mismo tiempo:
+1. **Mismo issue que L11**: el server inyecta `_config_name` en el GET
+   pero el modelo Pydantic del backtest tiene `extra="forbid"` y lo
+   rechaza con `extra_forbidden`.
+2. **El endpoint no levanta excepción** ante este tipo de error de
+   validación — devuelve HTTP 200 con `{"error": "<msg>"}`. Diferente
+   del `validate_controller_config` que sí levanta HTTP 400 (L11).
+
+**Síntoma**: cycle terminó con baseline `pnl=null`, todos los
+candidatos con `pnl=null`, verdict `no_valid_candidates`. Sin errors
+en el log porque ningún paso "falló" desde el punto de vista del
+loop.
+
+**Qué hacer.**
+- `backtest_loop._run_backtest_cached` ahora strip cualquier campo
+  que empiece con `_` antes de mandar al endpoint. Cubre
+  `_config_name` y deja preparado el caso de futuros campos
+  inyectados con el mismo patrón.
+- También detecta `{"error": "..."}` en la respuesta (sin `results`)
+  y lo convierte en `BacktestError` propio, así el verdict refleja
+  el problema correctamente.
+- **No cachear errores**: si la API falla, queremos reintentar la
+  próxima vez. La cache solo recibe responses exitosos.
+
+Después del fix: smoke E2E contra brigado funciona. Baseline + c1 +
+c2 corrieron, devolvieron PnL real, el verdict se clasificó como
+`all_candidates_negative_pnl` (la última hora fue mala para todos los
+TPs en BTC-USDT). El sistema funcionó correctamente; el resultado
+operativo (no_action) fue el correcto para esos datos.
+
+---
+
 ## Retired learnings
 
 (ninguno aún)

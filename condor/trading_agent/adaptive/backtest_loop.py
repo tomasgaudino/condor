@@ -165,6 +165,14 @@ async def _run_backtest_cached(
     if cached is not None:
         return cached.get("result"), "cache_hit", None
 
+    # The backtest endpoint validates the config with Pydantic
+    # ``extra="forbid"`` — but ``get_bot_controller_configs`` injects
+    # underscore-prefixed metadata (``_config_name``) that the model
+    # doesn't declare. Strip those before sending. Same asymmetry
+    # noted in LEARNINGS L11 for ``validate_controller_config``.
+    clean_config = {k: v for k, v in config_snapshot.items()
+                    if not (isinstance(k, str) and k.startswith("_"))}
+
     async with _BACKTEST_LOCK:
         try:
             result = await asyncio.wait_for(
@@ -173,7 +181,7 @@ async def _run_backtest_cached(
                     end_time=int(window["_end_dt"].timestamp()),
                     backtesting_resolution=window["resolution"],
                     trade_cost=DEFAULT_TRADE_COST,
-                    config=config_snapshot,
+                    config=clean_config,
                 ),
                 timeout=timeout_seconds,
             )
@@ -187,6 +195,15 @@ async def _run_backtest_cached(
                 "type": "backtest_error",
                 "detail": str(e),
             }
+
+    # Hummingbot sometimes returns HTTP 200 with ``{"error": "..."}``
+    # instead of raising — surface those as backtest_error so the
+    # cycle classifies the verdict correctly. We DON'T cache errors.
+    if isinstance(result, dict) and result.get("error") and "results" not in result:
+        return None, "error", {
+            "type": "backtest_error",
+            "detail": str(result["error"]),
+        }
 
     bt_cache.put(
         agent_dir, key, result,
