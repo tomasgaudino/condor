@@ -228,7 +228,14 @@
     - [x] Modo `shadow`: log-only en audit_log con `human_verdict=shadow_logged`.
     - [x] Modo `auto`: aplica directo via MCP tool tras stricter check (`require_backtest_evidence`). Marca `human_verdict=auto_applied` + escribe `last_changes` para cooldowns.
     - [x] 24 tests (paused, parse variants, invariants pre-check, auto strict checks, los 3 modos con verdicts variados, fallos parsing/LLM, build_audit_entry canónico).
-    - [ ] **Pendiente para una pasada de integración futura**: `runner.py` que (a) corre las 3 routines reales del repo, (b) extrae sus `agent:summary` + per-entity sections, (c) instancia el LLM client (claude-code via ACP o pydantic-ai) según `agent.agent_key`, y (d) invoca `run_tick`. Lo separamos como integración porque depende del runtime de Condor y se valida end-to-end con un smoke test en vivo, no con unit tests.
+    - [x] **runner.py — el activador del framework** (commit dedicado):
+        - `condor/trading_agent/adaptive/runner.py` con `tick_once()` (pure-ish entrypoint) y `run_forever()` (loop con sleep `frequency_sec`).
+        - CLI: `python -m condor.trading_agent.adaptive.runner <slug> [--server N] [--mode propose|shadow|auto] [--llm real|mock-no-action|mock-propose] [--once|--loop] [--max-ticks N]`.
+        - Snapshots: llama las **funciones puras** de las 3 routines (no `run()` que es Telegram-side). Reusa todos los helpers `_compose_aggregate`, `_build_agent_payload`, `_build_agent_summary`, `_resolve_perf`, etc.
+        - LLM factory con 3 modos: `mock-no-action`, `mock-propose` (extrae el primer canonical_id real del prompt y aplica la regla MVP D5), `real` (stub para ACP/pydantic-ai — pendiente).
+        - Proposal context enrichment: el wrapper de `_process_proposal` añade `_current_config`, `_client_ref`, `bot_name`, `regime_observed`, `suboptimal_minutes`, etc. antes de llamar al backtest cycle.
+        - 17 tests + 2 smoke tests reales contra brigado (mock-no-action y mock-propose con verdict `all_candidates_negative_pnl` correctamente registrado en audit log).
+    - [ ] **`real` LLM** (claude-code ACP / pydantic-ai) — stub que arroja `NotImplementedError` con mensaje claro. Próximo deliverable: hookear `condor.acp.client.AcpClient` con una sesión long-running por agente.
 
 ---
 
