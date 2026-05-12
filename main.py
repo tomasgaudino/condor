@@ -341,6 +341,11 @@ def register_handlers(application: Application) -> None:
         CallbackQueryHandler(admin_callback_handler, pattern="^admin:")
     )
 
+    # Add adaptive (propose-mode) callback handler — adaptive framework
+    from handlers.adaptive import get_callback_handler as get_adaptive_callback_handler
+
+    application.add_handler(get_adaptive_callback_handler())
+
     # Add callback query handler for portfolio settings
     application.add_handler(get_portfolio_callback_handler())
 

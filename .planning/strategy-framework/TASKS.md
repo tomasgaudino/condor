@@ -207,7 +207,13 @@
     - [x] `state/` con README + .gitkeep para memoria persistente
     - [x] Loader/validator `condor/trading_agent/adaptive/invariants.py` con cross-check contra MCP tool metadata (F5 — fuente única de truth)
     - [x] 36 tests del loader (file errors, required keys, type overlap, capital bounds, backtest enum, helpers, cross-check drift detection)
-- [ ] **5.6** Implementar handler de modo `propose` (Telegram inline buttons)
+- [x] **5.6** Implementar handler de modo `propose` (Telegram inline buttons)
+    - [x] `condor/trading_agent/adaptive/audit.py`: append + update-in-place atómico del audit_log.jsonl, upsert de last_changes.json, compute_cooldown_end con 3 tiers (per-field/per-controller/global) + snooze cooldown_until extiende, expire_old_pending_proposals (24h)
+    - [x] `handlers/adaptive/messages.py`: callback data builders (apply/reject/snooze), build_propose_text (MarkdownV2 escapado), build_propose_keyboard (winner-first + alternativas + reject/snooze), verdict edit messages
+    - [x] `handlers/adaptive/__init__.py`: dispatcher con `pattern="^adaptive:"`, descubrimiento del agent_dir por presencia de invariants.yaml, double-click guard, apply/reject/snooze handlers con full state lifecycle, integración con la MCP tool de 5.4, send_proposal API para la fase 5.7
+    - [x] Registración en `main.py`
+    - [x] 94 tests nuevos (24 audit + 22 messages + 48 handler con fakes)
+    - [x] Note: agent loop que GENERA las proposals queda para 5.7 — esta fase entrega la infraestructura de propose mode (lifecycle + persistencia + UI Telegram + apply via MCP tool)
 - [ ] **5.7** Implementar modos `shadow` y `auto`
 
 ---

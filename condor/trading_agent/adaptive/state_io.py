@@ -51,6 +51,20 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def utc_iso(dt: datetime | None = None) -> str:
+    """Format a datetime as the canonical ISO8601 UTC string used in
+    the framework (``2026-05-12T14:32:18Z``).
+
+    Defaults to ``utc_now()``. The returned string parses back cleanly
+    with :func:`parse_ts`.
+    """
+    if dt is None:
+        dt = utc_now()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # ---------------------------------------------------------------------------
 # JSONL — append-only line-delimited JSON
 # ---------------------------------------------------------------------------
