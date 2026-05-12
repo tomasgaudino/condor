@@ -222,7 +222,13 @@
     - [x] Registración en `main.py`
     - [x] 94 tests nuevos (24 audit + 22 messages + 48 handler con fakes)
     - [x] Note: agent loop que GENERA las proposals queda para 5.7 — esta fase entrega la infraestructura de propose mode (lifecycle + persistencia + UI Telegram + apply via MCP tool)
-- [ ] **5.7** Implementar modos `shadow` y `auto`
+- [x] **5.7** Implementar modos `shadow` y `auto` + orchestrator del tick
+    - [x] `condor/trading_agent/adaptive/orchestrator.py` — `run_tick(ctx, agent_md_body)`. Pre-flight (agent_paused, expire pendientes, cache cleanup) → build_llm_prompt → invoke llm_call → parse_llm_response → loop por proposal: invariants pre-check → backtest_cycle → audit entry → mode-dependent action (propose/shadow/auto). LLM y MCP apply son INJECTADOS (testeable sin Condor).
+    - [x] Modo `propose`: usa `send_proposal` del handler de 5.6.
+    - [x] Modo `shadow`: log-only en audit_log con `human_verdict=shadow_logged`.
+    - [x] Modo `auto`: aplica directo via MCP tool tras stricter check (`require_backtest_evidence`). Marca `human_verdict=auto_applied` + escribe `last_changes` para cooldowns.
+    - [x] 24 tests (paused, parse variants, invariants pre-check, auto strict checks, los 3 modos con verdicts variados, fallos parsing/LLM, build_audit_entry canónico).
+    - [ ] **Pendiente para una pasada de integración futura**: `runner.py` que (a) corre las 3 routines reales del repo, (b) extrae sus `agent:summary` + per-entity sections, (c) instancia el LLM client (claude-code via ACP o pydantic-ai) según `agent.agent_key`, y (d) invoca `run_tick`. Lo separamos como integración porque depende del runtime de Condor y se valida end-to-end con un smoke test en vivo, no con unit tests.
 
 ---
 
