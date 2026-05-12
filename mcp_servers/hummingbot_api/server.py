@@ -45,6 +45,9 @@ from mcp_servers.hummingbot_api.tools.gateway_clmm import explore_gateway_clmm_p
 from mcp_servers.hummingbot_api.tools.gateway_swap import manage_gateway_swaps as manage_gateway_swaps_impl
 from mcp_servers.hummingbot_api.tools.geckoterminal import explore_geckoterminal as explore_geckoterminal_impl
 from mcp_servers.hummingbot_api.tools import history as history_tools
+from mcp_servers.hummingbot_api.tools.adaptive_agent import (
+    update_controller_config as update_controller_config_impl,
+)
 from mcp_servers.hummingbot_api.tools.backtesting import (
     manage_backtest_tasks as manage_backtest_tasks_impl,
     run_backtest as run_backtest_impl,
@@ -996,6 +999,59 @@ def _apply_cli_args():
         settings.api_password = args.password
     if args.server_name:
         settings.server_name = args.server_name
+
+
+@mcp.tool()
+@handle_errors("update controller config (adaptive)")
+async def update_controller_config(
+        bot_name: str,
+        controller_id: str,
+        field: str,
+        value: Any,
+        expected_old_value: Any | None = None,
+) -> str:
+    """Update a single is_updatable field of a running controller (adaptive agent).
+
+    Stricter wrapper around the existing per-bot update endpoint, used
+    by the adaptive supervisor to apply approved patches:
+    - Validates against an explicit whitelist of is_updatable fields
+      (silent-write protection — Hummingbot would otherwise no-op
+      writes to non-updatable fields until the next bot restart).
+    - Enforces an absolute blacklist (manual_kill_switch, leverage,
+      connector_name, etc.) regardless of whitelist.
+    - Coerces `value` to the type of the current value.
+    - Optional optimistic lock via `expected_old_value` (detects races
+      between proposal and apply).
+    - Returns auto-generated caveats per field (e.g. `take_profit`
+      only affects executors created after the ~10s hot-reload).
+
+    The write itself is atomic: Hummingbot does a shallow merge on the
+    YAML config, so we pass only `{field: value}` and the other fields
+    stay bit-identical.
+
+    Args:
+        bot_name: Name of the running bot.
+        controller_id: Controller's `_config_name` (or `id`).
+        field: Field to write.
+        value: New value (will be coerced).
+        expected_old_value: If set, the write only proceeds when the
+            current value equals this. Disables the lock when omitted.
+
+    Returns: JSON string of the result dict — either
+        `{"success": True, ...}` or
+        `{"success": False, "error_code": ..., ...}`.
+    """
+    import json
+    client = await hummingbot_client.get_client()
+    result = await update_controller_config_impl(
+        client=client,
+        bot_name=bot_name,
+        controller_id=controller_id,
+        field=field,
+        value=value,
+        expected_old_value=expected_old_value,
+    )
+    return json.dumps(result, default=str, indent=2)
 
 
 async def _run():

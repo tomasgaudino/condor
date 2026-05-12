@@ -248,6 +248,34 @@ reales, indistinguibles para el humano.
 
 ---
 
+### L11 — `validate_controller_config` rechaza `_config_name` que el GET inyecta (2026-05-12)
+
+**Qué pasó.** Al construir el config mergeado para pasar a
+`client.controllers.validate_controller_config(...)` en
+`update_controller_config`, el endpoint rechaza el cuerpo entero con
+`extra_forbidden` sobre el campo `_config_name`. Causa: `get_bot_controller_configs`
+**inyecta** `_config_name` (el filename del YAML) en el response, pero
+el modelo Pydantic `PMMisterConfig` del server NO lo declara y tiene
+`model_config = ConfigDict(extra="forbid")`. Asimétrico.
+
+**Síntoma**: pre-validation endpoint devuelve HTTP 400; si el tool
+abortara al fallar la validación, el agente no podría escribir nada.
+
+**Qué hacer.**
+- El tool `update_controller_config` ya implementa "graceful degrade":
+  loggea warning, sigue al apply. El apply funciona porque pasamos
+  solo `{field: value}` y el endpoint de update no tiene `extra="forbid"`.
+- **No** depender de `validate_controller_config` para correctness:
+  tratarlo como una optimización (fast-fail) que puede no estar
+  disponible. La validación de tipos primaria sigue siendo el
+  type-coercion local + el merge shallow del server.
+- Antes de pulir esto, ver si conviene cleanear `_config_name` (y
+  cualquier otro `_*`-prefixed) antes de mandar al validate — pero es
+  riesgoso porque podría haber más campos inyectados que no conocemos.
+  Mantener el graceful-degrade es la opción más robusta.
+
+---
+
 ## Retired learnings
 
 (ninguno aún)

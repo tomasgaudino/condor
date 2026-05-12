@@ -193,7 +193,13 @@
     - [x] 48 tests + smoke validado contra brigado (14 controllers)
     - [ ] `suboptimal_period_minutes` real (requiere tracking de transiciones, igual que `persistence_minutes` de market_regime — se completa cuando el agente lea el output)
     - [ ] `accuracy`, `adverse_fill_ratio`, `gross_spread_captured` — fuera del MVP (requieren PnL por position histórico o data de price post-fill)
-- [ ] **5.4** Implementar la MCP tool `update_controller_config`
+- [x] **5.4** Implementar la MCP tool `update_controller_config`
+    - [x] Módulo de metadata `_controller_field_metadata.py` (whitelist pmm_mister, blacklist absoluta, caveats)
+    - [x] Tool `adaptive_agent.py::update_controller_config` con todos los paths del spec
+    - [x] Registración en `server.py` con `@mcp.tool()`
+    - [x] 48 tests (whitelist, blacklist, controller_not_supported, coerce bool/int/float/list/string, optimistic-lock, validation graceful-degrade, api_error, atomic payload single-field, response shape, caveats)
+    - [x] Smoke validado contra brigado: idempotent write OK, los 6 error paths funcionan
+    - [x] L11 anotada: `validate_controller_config` rechaza `_config_name` inyectado por el GET — el graceful-degrade del tool maneja esto correctamente
 - [ ] **5.5** Crear el agent dir: `trading_agents/adaptive_pmm/`
     - [ ] `agent.md` con la rule MVP de D5
     - [ ] `policy.md` con reglas en prosa
