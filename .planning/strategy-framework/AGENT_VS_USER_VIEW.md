@@ -175,35 +175,48 @@ agent_view = next(
 
 ---
 
-### `market_regime` (en diseño, próxima a implementar)
+### `market_regime` (implementada · multi-pair)
 
-> Contrato diseñado antes de codear, siguiendo la regla 4 del doc.
-> Spec base de cómputo: `MARKET_REGIME_SPEC.md` (no se duplica acá).
-> El connector default es **`binance` (spot)** — los `pmm_mister`
-> corren ahí, perps fuera de scope.
+> Spec base de cómputo: `MARKET_REGIME_SPEC.md`.
+> Connector default: **`binance` (spot)**.
+> El routine es **multi-pair por diseño** — opera sobre N pares en
+> una sola corrida y emite un único report agregado para el humano,
+> pero un agent_view **por par** (B2 — ver decisión 2026-05-12).
+
+#### Estrategia de pares
+
+`Config.trading_pairs: list[str]` con dos modos:
+- **vacío (default)**: autodetect desde los controllers activos del
+  server elegido. Filtra a spot (los `pmm_mister` no usan perps).
+- **explícito**: override puro, lista de pares a procesar.
+
+Si en un mismo Run aparecen pares de varios connectors, el routine
+los agrupa pero los procesa todos contra el connector declarado en
+el Config (default `binance`). El autodetect respeta esto.
 
 #### User view
 
 Compone:
-- **`text`** — 1 línea ASCII tipo
-  `"BTC-USDT · mean_rev_high_vol · 🟡 suboptimal · conf=hi · 47m"`.
-  Orden: pair → régimen canónico → emoji+favorability → confianza →
-  persistencia. ASCII puro, sin backticks (L2).
-- **4 KPI cards** (`type="kpi"`):
-  - REGIME (`mean_rev_high_vol`, delta=régimen anterior si transitó
-    en este tick).
-  - FAVORABILITY (🟢 optimal / 🟡 suboptimal / 🔴 adverse,
-    trend=up/down vs tick anterior).
-  - CONFIDENCE (high/med/low, sin delta).
-  - PERSISTENCE (`47m`, trend=up = se sostiene; reset a 0 = transición).
-- **Tabla por timeframe** (`table_data` + `table_columns`):
-  3 filas (micro/meso/macro), columnas
-  `timeframe, directionality, volatility, key_indicator, value, regime_local`.
-  El "key indicator" por fila es el más explicativo: NATR para micro,
-  Hurst para meso, position_in_range_30d para macro.
-- **Report HTML persistido** (`ReportBuilder.save()` — L3) con:
-  KPIs → narrativa → tabla → bloque S/R con distancia al precio →
-  glosario contextual.
+- **`text`** — 1 línea ASCII agregada:
+  `"5 pairs · 1🟢 2🟡 2🔴 · worst: SOL-USDT adverse"` (multi-pair) o
+  `"BTC-USDT · mean_rev_high_vol · 🟡 suboptimal · conf=hi"` (1 par).
+- **4 KPI cards** agregadas:
+  - PAIRS (count total).
+  - OPTIMAL / SUBOPTIMAL / ADVERSE (count, con delta = % del total).
+- **Tabla agregada** (`table_data` + `table_columns`):
+  1 fila por par, columnas `pair, regime, favorability, confidence, bias, support_dist, resistance_dist`.
+  Ordenada con adverse arriba (lo que necesita atención).
+- **Report HTML persistido** (`ReportBuilder.save()` — L3):
+  1. **Tabla resumen** arriba (la misma que la del RoutineResult).
+  2. **Markdown TOC** con anchors `[BTC-USDT](#btc-usdt) · [ETH-USDT](#eth-usdt) · ...`.
+  3. **Sub-sección por par** (`## <PAIR>`):
+     - KPIs por par (regime, favorability, confidence, persistence).
+     - Narrativa.
+     - Tabla por timeframe (5m/1h/1d).
+     - Niveles cercanos (S/R) y macro.
+  4. **Glosario único** al final (no se repite por par).
+  No hay tabs JS — `ReportBuilder` no las soporta. El TOC con anchors
+  da la misma función (1 click salta a la sección del par).
 - **Narrativa**: 2-5 frases determinísticas en castellano, status
   🟢/🟡/🔴 según `favorability`. Casos especiales:
   - Trending con pullback: mencionar explícitamente que el macro va
@@ -217,7 +230,21 @@ Compone:
   - `random_walk` si aparece en algún timeframe.
   - `position_in_range_30d` solo si > 0.85 o < 0.15 (zonas extremas).
 
-#### Agent view
+#### Agent view (per-pair, multiple sections)
+
+Cada par emite su propia sección `type="data", title="agent:<PAIR>"`,
+no un único dict consolidado. Decisión "B2" del 2026-05-12:
+
+- **Por qué**: cuando el engine del agente itere por controllers
+  activos, va a querer pasar al LLM **solo** los pares del controller
+  que está evaluando, no un payload monstruoso con todos. Las
+  secciones independientes per-pair permiten ese filtrado trivialmente
+  (`s["title"] == f"agent:{pair}"`).
+- **Convivencia**: el `_save_report` y el `RoutineResult.text` del
+  routine siguen siendo agregados (visión humana global). Solo el
+  agent view es per-pair.
+
+Shape de cada sección:
 
 ```json
 {
@@ -240,6 +267,23 @@ Compone:
     "resistance_distance_pct": 0.008
   },
   "history_available": true
+}
+```
+
+Adicionalmente se emite **una** sección `title="agent:summary"` con
+la matriz agregada para uso comparativo del agente (decisiones
+inter-controller):
+
+```json
+{
+  "ts": "...",
+  "pairs": ["BTC-USDT", "ETH-USDT", ...],
+  "by_pair": {
+    "BTC-USDT": {"regime": "...", "favorability": "...", "confidence": "..."},
+    ...
+  },
+  "counts": {"optimal": 1, "suboptimal": 2, "adverse": 2},
+  "worst": {"pair": "SOL-USDT", "favorability": "adverse"}
 }
 ```
 

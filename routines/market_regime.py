@@ -71,12 +71,31 @@ ADX_TRENDING = 25.0
 
 
 class Config(BaseModel):
-    """Multi-timeframe market regime classifier."""
+    """Multi-timeframe market regime classifier (multi-pair).
 
-    trading_pair: str = Field(default="BTC-USDT")
+    Operates on N trading pairs in a single run. If ``trading_pairs``
+    is empty the routine autodetects the pairs from the active
+    controllers on the connected server (default behavior).
+    """
+
+    trading_pairs: list[str] = Field(
+        default=[],
+        description=(
+            "List of pairs to classify. Empty = autodetect from active "
+            "controllers (spot only). Explicit list overrides autodetect."
+        ),
+    )
     connector_name: str = Field(
         default="binance",
         description="Spot connector — pmm_mister does not run on perps.",
+    )
+
+    # Legacy single-pair shim. Kept so old callers / saved instance configs
+    # still work; if non-empty and `trading_pairs` is empty, it becomes
+    # the single pair to process.
+    trading_pair: str | None = Field(
+        default=None,
+        description="DEPRECATED — use `trading_pairs`. Kept for back-compat.",
     )
 
     # Timeframes
@@ -604,7 +623,16 @@ def _utc_iso() -> str:
 def _compose_payload(
     cfg: Config,
     micro: dict, meso: dict, macro: dict,
+    *,
+    pair: str | None = None,
 ) -> dict[str, Any]:
+    """Build the per-pair payload.
+
+    ``pair`` overrides the (legacy) ``cfg.trading_pair`` field. The
+    multi-pair entry point passes ``pair`` explicitly; the
+    back-compat path falls back to ``cfg.trading_pair`` so old tests
+    keep working with `Config(trading_pair="BTC-USDT")`.
+    """
     canon = _build_canonical(micro, meso, macro)
     fav, triggers = _favorability(canon)
     persistence = _compute_persistence_minutes(canon["regime"])
@@ -615,9 +643,11 @@ def _compose_payload(
         and macro["samples"] >= 30
     )
 
+    chosen_pair = pair if pair is not None else (cfg.trading_pair or "")
+
     return {
         "ts": _utc_iso(),
-        "trading_pair": cfg.trading_pair,
+        "trading_pair": chosen_pair,
         "connector": cfg.connector_name,
         "summary": {
             "canonical_regime": canon["regime"],
@@ -1021,6 +1051,317 @@ def _save_report(payload: dict[str, Any]) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Multi-pair: autodetect, compose, render
+# ---------------------------------------------------------------------------
+
+
+async def _autodetect_pairs(client, connector_filter: str) -> list[str]:
+    """Discover trading pairs traded by active controllers on the server.
+
+    Returns a sorted, deduplicated list of pairs. Filters to controllers
+    whose ``connector_name`` matches ``connector_filter`` (spot only —
+    pmm_mister does not run on perps).
+
+    Returns an empty list if no controllers are active or the API errors
+    out. The caller decides how to handle that (the entrypoint emits a
+    "No pairs" RoutineResult).
+    """
+    try:
+        bots_raw = await client.bot_orchestration.get_active_bots_status()
+    except Exception as e:
+        logger.warning("market_regime: get_active_bots_status failed: %s", e)
+        return []
+    bots_data = bots_raw.get("data", {}) if isinstance(bots_raw, dict) else {}
+
+    pairs: set[str] = set()
+    for bot_name in bots_data.keys():
+        try:
+            cfgs = await client.controllers.get_bot_controller_configs(bot_name)
+        except Exception as e:
+            logger.warning("market_regime: configs for %s failed: %s", bot_name, e)
+            continue
+        for cfg in cfgs or []:
+            if not isinstance(cfg, dict):
+                continue
+            if cfg.get("connector_name") != connector_filter:
+                continue
+            pair = cfg.get("trading_pair")
+            if pair:
+                pairs.add(pair)
+    return sorted(pairs)
+
+
+async def _process_one_pair(
+    client, cfg: Config, pair: str
+) -> dict[str, Any]:
+    """Fetch candles + compute payload for one pair. Empty dict on hard failure.
+
+    Concurrency at the timeframe level (3 fetches in parallel per pair);
+    the caller can fan-out at the pair level if it wants extra parallelism.
+    """
+    micro_raw, meso_raw, macro_raw = await asyncio.gather(
+        _fetch_candles(client, cfg.connector_name, pair,
+                       cfg.micro_interval, cfg.micro_lookback_candles),
+        _fetch_candles(client, cfg.connector_name, pair,
+                       cfg.meso_interval, cfg.meso_lookback_candles),
+        _fetch_candles(client, cfg.connector_name, pair,
+                       cfg.macro_interval, cfg.macro_lookback_candles),
+    )
+    if not micro_raw and not meso_raw and not macro_raw:
+        return {}
+    micro = _compute_micro_block(micro_raw, cfg)
+    meso = _compute_meso_block(meso_raw, cfg)
+    macro = _compute_macro_block(macro_raw, cfg)
+    return _compose_payload(cfg, micro, meso, macro, pair=pair)
+
+
+def _compose_aggregate(payloads_by_pair: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate view across pairs: counts, worst, per-pair summaries.
+
+    Filtered to non-empty per-pair payloads (failed pairs are skipped).
+    """
+    counts = {"optimal": 0, "suboptimal": 0, "adverse": 0}
+    by_pair = {}
+    worst_rank = {"adverse": 0, "suboptimal": 1, "optimal": 2}
+    worst_pair = None
+    worst_fav = None
+
+    for pair, p in payloads_by_pair.items():
+        if not p:
+            continue
+        s = p.get("summary", {})
+        fav = s.get("favorability", "suboptimal")
+        if fav in counts:
+            counts[fav] += 1
+        by_pair[pair] = {
+            "regime": s.get("canonical_regime"),
+            "directionality": s.get("directionality"),
+            "volatility": s.get("volatility"),
+            "favorability": fav,
+            "confidence": s.get("confidence"),
+            "bias": s.get("bias"),
+        }
+        if worst_fav is None or worst_rank.get(fav, 99) < worst_rank.get(worst_fav, 99):
+            worst_fav, worst_pair = fav, pair
+
+    return {
+        "ts": _utc_iso(),
+        "pairs": sorted(by_pair.keys()),
+        "by_pair": by_pair,
+        "counts": counts,
+        "worst": (
+            {"pair": worst_pair, "favorability": worst_fav}
+            if worst_pair else None
+        ),
+    }
+
+
+def _aggregate_text(aggregate: dict[str, Any], payloads_by_pair: dict) -> str:
+    """One-line ASCII summary across all pairs.
+
+    Examples:
+      "5 pairs · 1🟢 2🟡 2🔴 · worst: SOL-USDT adverse"
+      "BTC-USDT · trending_down_low_vol · 🔴 adverse · conf=low"  (single pair)
+    """
+    pairs = aggregate["pairs"]
+    if not pairs:
+        return "market_regime: no pairs."
+    if len(pairs) == 1:
+        # Fall back to per-pair text for the single-pair case.
+        only = payloads_by_pair.get(pairs[0])
+        if only:
+            return _render_compact_summary(only)
+    c = aggregate["counts"]
+    worst = aggregate.get("worst") or {}
+    worst_str = (
+        f" · worst: {worst.get('pair')} {worst.get('favorability')}"
+        if worst.get("pair") else ""
+    )
+    return (
+        f"{len(pairs)} pairs · "
+        f"{c['optimal']}🟢 {c['suboptimal']}🟡 {c['adverse']}🔴"
+        f"{worst_str}"
+    )
+
+
+def _aggregate_kpi_sections(aggregate: dict[str, Any]) -> list[dict[str, Any]]:
+    pairs = aggregate["pairs"]
+    total = len(pairs)
+    c = aggregate["counts"]
+
+    def _delta(count: int) -> str | None:
+        if total == 0:
+            return None
+        return f"{count * 100 // total}% of total"
+
+    return [
+        {"type": "kpi", "label": "Pairs",      "value": str(total),       "delta": None, "trend": "neutral"},
+        {"type": "kpi", "label": "Optimal",    "value": f"🟢 {c['optimal']}",    "delta": _delta(c['optimal']),    "trend": "up"     if c['optimal']    else "neutral"},
+        {"type": "kpi", "label": "Suboptimal", "value": f"🟡 {c['suboptimal']}", "delta": _delta(c['suboptimal']), "trend": "neutral"},
+        {"type": "kpi", "label": "Adverse",    "value": f"🔴 {c['adverse']}",    "delta": _delta(c['adverse']),    "trend": "down"   if c['adverse']    else "neutral"},
+    ]
+
+
+def _aggregate_table(payloads_by_pair: dict[str, dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
+    """Summary matrix: 1 row per pair. Sorted adverse → suboptimal → optimal."""
+    columns = ["pair", "regime", "favorability", "confidence", "bias", "support_dist", "resistance_dist"]
+    rank = {"adverse": 0, "suboptimal": 1, "optimal": 2}
+
+    rows = []
+    for pair, p in payloads_by_pair.items():
+        if not p:
+            continue
+        s = p.get("summary", {})
+        meso = p.get("meso_1h", {}) or {}
+        sr = meso.get("support_resistance") or {}
+        sup = sr.get("support") or {}
+        res = sr.get("resistance") or {}
+
+        def _pct(v):
+            return f"{v * 100:.2f}%" if isinstance(v, (int, float)) else "—"
+
+        rows.append({
+            "pair": pair,
+            "regime": s.get("canonical_regime", "?"),
+            "favorability": f"{_FAV_EMOJI.get(s.get('favorability', ''), '')} {s.get('favorability', '?')}".strip(),
+            "confidence": s.get("confidence", "?"),
+            "bias": s.get("bias") or "—",
+            "support_dist": _pct(sup.get("distance_pct")),
+            "resistance_dist": _pct(res.get("distance_pct")),
+        })
+
+    rows.sort(key=lambda r: (rank.get(r["favorability"].split()[-1] if " " in r["favorability"] else r["favorability"], 99), r["pair"]))
+    return columns, rows
+
+
+def _build_agent_summary(aggregate: dict[str, Any]) -> dict[str, Any]:
+    """Minimal cross-pair view for the agent — sits next to the per-pair
+    sections. Lets the LLM see the overall landscape without having to
+    re-aggregate the per-pair payloads itself."""
+    return {
+        "ts": aggregate["ts"],
+        "pairs": aggregate["pairs"],
+        "by_pair": aggregate["by_pair"],
+        "counts": aggregate["counts"],
+        "worst": aggregate["worst"],
+    }
+
+
+def _save_multi_pair_report(
+    aggregate: dict[str, Any],
+    payloads_by_pair: dict[str, dict[str, Any]],
+) -> str | None:
+    """Single HTML report with summary matrix on top, sub-sections per pair,
+    and one glossary at the very bottom. No JS tabs (ReportBuilder does
+    not support them) — markdown anchors give the same UX.
+    """
+    try:
+        from condor.reports import ReportBuilder
+    except Exception as e:
+        logger.warning("ReportBuilder import failed: %s", e)
+        return None
+
+    pairs = aggregate["pairs"]
+    if not pairs:
+        return None
+
+    title_pairs = ", ".join(pairs[:3]) + (f" +{len(pairs) - 3}" if len(pairs) > 3 else "")
+    builder = ReportBuilder(f"Market Regime — {title_pairs} — {aggregate['ts']}")
+    builder.source("routine", "market_regime").tags(["adaptive_framework", "regime", "multi_pair"])
+
+    # 4 aggregate KPIs.
+    for k in _aggregate_kpi_sections(aggregate):
+        builder.kpi(k["label"], k["value"], delta=k.get("delta"), trend=k.get("trend", "neutral"))
+
+    # Resumen narrativo agregado (1-2 frases).
+    worst = aggregate.get("worst") or {}
+    if worst.get("pair"):
+        builder.markdown(
+            "## Resumen\n\n"
+            f"De **{len(pairs)} pares** procesados, "
+            f"{aggregate['counts']['optimal']} están en zona óptima, "
+            f"{aggregate['counts']['suboptimal']} en zona subóptima y "
+            f"{aggregate['counts']['adverse']} en zona adversa para PMM. "
+            f"El más crítico es **{worst['pair']}** ({worst['favorability']})."
+        )
+
+    # Tabla resumen.
+    cols, rows = _aggregate_table(payloads_by_pair)
+    if rows:
+        builder.markdown("## Por par")
+        builder.table(rows, columns=cols)
+
+    # TOC con anchors (markdown anchors usan slug del header).
+    toc = " · ".join(f"[{p}](#{p.lower().replace('-', '-')})" for p in pairs)
+    builder.markdown(f"**Ir a:** {toc}")
+
+    # Sub-sección por par.
+    for pair in pairs:
+        p = payloads_by_pair.get(pair)
+        if not p:
+            continue
+        s = p["summary"]
+        fav = s["favorability"]
+        emoji = _FAV_EMOJI.get(fav, "")
+        persistence = s.get("persistence_minutes")
+        persistence_value = f"{persistence}m" if persistence is not None else "n/a"
+
+        body = [
+            f"## {pair}",
+            "",
+            f"**Régimen**: `{s['canonical_regime']}` · **Favorability**: {emoji} {fav} · "
+            f"**Confidence**: {s['confidence']} · **Persistence**: {persistence_value}",
+            "",
+            _build_narrative(p),
+        ]
+        builder.markdown("\n".join(body))
+
+        cols_tf, rows_tf = _build_timeframe_table(p)
+        if rows_tf:
+            builder.table(rows_tf, columns=cols_tf)
+
+        # S/R block (if any)
+        sr = (p.get("meso_1h", {}) or {}).get("support_resistance") or {}
+        sup, res = sr.get("support"), sr.get("resistance")
+        if sup or res:
+            lines = ["### Niveles cercanos (1h)"]
+            if sup:
+                lines.append(
+                    f"- **Soporte**: {sup['price']:.4f} "
+                    f"({sup['distance_pct']*100:.2f}%, {sup['touches']} toques)"
+                )
+            if res:
+                lines.append(
+                    f"- **Resistencia**: {res['price']:.4f} "
+                    f"({res['distance_pct']*100:.2f}%, {res['touches']} toques)"
+                )
+            builder.markdown("\n".join(lines))
+
+        # Macro levels
+        macro = p.get("macro_1d", {}).get("levels_macro", {})
+        if macro:
+            lines = ["### Niveles macro"]
+            for label, key in (
+                ("Máx 7d", "high_7d"), ("Mín 7d", "low_7d"),
+                ("Máx 30d", "high_30d"), ("Mín 30d", "low_30d"),
+                ("Máx 90d", "high_90d"), ("Mín 90d", "low_90d"),
+            ):
+                v = macro.get(key)
+                if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                    lines.append(f"- **{label}**: {v:.4f}")
+            if len(lines) > 1:
+                builder.markdown("\n".join(lines))
+
+    # Glosario único al final — usa el primer payload para selección
+    # contextual; los términos base están siempre.
+    first_payload = next((p for p in payloads_by_pair.values() if p), None)
+    if first_payload is not None:
+        builder.markdown(_build_glossary_markdown(first_payload))
+
+    return builder.save()
+
+
+# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
@@ -1031,39 +1372,74 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     if not client:
         return RoutineResult(text="Could not connect to API server.")
 
-    # Fetch the three timeframes in parallel.
-    micro_raw, meso_raw, macro_raw = await asyncio.gather(
-        _fetch_candles(client, config.connector_name, config.trading_pair,
-                       config.micro_interval, config.micro_lookback_candles),
-        _fetch_candles(client, config.connector_name, config.trading_pair,
-                       config.meso_interval, config.meso_lookback_candles),
-        _fetch_candles(client, config.connector_name, config.trading_pair,
-                       config.macro_interval, config.macro_lookback_candles),
-    )
-
-    if not micro_raw and not meso_raw and not macro_raw:
+    # Resolve the pair list.
+    pairs: list[str] = list(config.trading_pairs or [])
+    if not pairs and config.trading_pair:
+        pairs = [config.trading_pair]  # legacy single-pair fallback
+    if not pairs:
+        pairs = await _autodetect_pairs(client, config.connector_name)
+    if not pairs:
         return RoutineResult(
-            text=f"No candle data for {config.trading_pair} on {config.connector_name}."
+            text=(
+                f"No pairs to classify (no active controllers on "
+                f"{config.connector_name}, and no `trading_pairs` supplied)."
+            )
         )
 
-    micro = _compute_micro_block(micro_raw, config)
-    meso = _compute_meso_block(meso_raw, config)
-    macro = _compute_macro_block(macro_raw, config)
-    payload = _compose_payload(config, micro, meso, macro)
+    # Fan-out: process all pairs in parallel.
+    results = await asyncio.gather(
+        *(_process_one_pair(client, config, p) for p in pairs),
+        return_exceptions=True,
+    )
+    payloads_by_pair: dict[str, dict[str, Any]] = {}
+    for pair, res in zip(pairs, results):
+        if isinstance(res, Exception):
+            logger.error("market_regime: pair %s failed: %s", pair, res)
+            continue
+        if res:
+            payloads_by_pair[pair] = res
 
-    # Persist HTML report — L3.
+    if not payloads_by_pair:
+        return RoutineResult(
+            text=f"No candle data for any of {len(pairs)} pairs on {config.connector_name}."
+        )
+
+    aggregate = _compose_aggregate(payloads_by_pair)
+
+    # Persist a single multi-pair HTML report — L3.
     try:
-        _save_report(payload)
+        _save_multi_pair_report(aggregate, payloads_by_pair)
     except Exception as e:
-        logger.error("market_regime: failed to save report: %s", e)
+        logger.error("market_regime: failed to save multi-pair report: %s", e)
 
-    text = _render_compact_summary(payload)
-    kpi_sections = _build_kpi_sections(payload)
-    data_sections = [
-        {"type": "data", "title": "payload", "data": payload},
-        {"type": "data", "title": "agent",   "data": _build_agent_payload(payload)},
+    text = _aggregate_text(aggregate, payloads_by_pair)
+
+    # Sections:
+    # - Aggregate KPIs (4 cards: pairs / optimal / suboptimal / adverse).
+    # - "payload": full multi-pair payload (archival / dashboard).
+    # - "agent:summary": cross-pair view for the agent.
+    # - "agent:<PAIR>" (× N): per-pair agent view, what the LLM reads
+    #   when reasoning about that particular controller.
+    kpi_sections = _aggregate_kpi_sections(aggregate)
+    full_payload = {
+        "ts": aggregate["ts"],
+        "connector": config.connector_name,
+        "pairs": aggregate["pairs"],
+        "payloads": payloads_by_pair,
+        "aggregate": aggregate,
+    }
+    data_sections: list[dict[str, Any]] = [
+        {"type": "data", "title": "payload", "data": full_payload},
+        {"type": "data", "title": "agent:summary", "data": _build_agent_summary(aggregate)},
     ]
-    table_columns, table_rows = _build_timeframe_table(payload)
+    for pair in aggregate["pairs"]:
+        data_sections.append({
+            "type": "data",
+            "title": f"agent:{pair}",
+            "data": _build_agent_payload(payloads_by_pair[pair]),
+        })
+
+    table_columns, table_rows = _aggregate_table(payloads_by_pair)
 
     return RoutineResult(
         text=text,

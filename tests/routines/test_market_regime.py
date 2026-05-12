@@ -483,3 +483,219 @@ def test_glossary_markdown_has_glossary_header():
     payload = _compose_payload(cfg, micro, meso, macro)
     md = _build_glossary_markdown(payload)
     assert "## Glosario" in md
+
+
+# ---------------------------------------------------------------------------
+# Multi-pair: autodetect, aggregate, summary table
+# ---------------------------------------------------------------------------
+
+
+import asyncio
+
+from routines.market_regime import (
+    _autodetect_pairs,
+    _aggregate_kpi_sections,
+    _aggregate_table,
+    _aggregate_text,
+    _build_agent_summary,
+    _compose_aggregate,
+)
+
+
+def _per_pair_payload(pair: str, favorability: str, regime: str = "mean_reverting_mod_vol") -> dict:
+    """Lightweight per-pair payload for aggregate unit tests."""
+    return {
+        "ts": "2026-05-12T00:00:00Z",
+        "trading_pair": pair,
+        "connector": "binance",
+        "summary": {
+            "canonical_regime": regime,
+            "directionality": "mean_reverting",
+            "volatility": "moderate",
+            "favorability": favorability,
+            "confidence": "high",
+            "persistence_minutes": None,
+            "bias": None,
+            "trigger_candidates": [],
+        },
+        "micro_5m": {"directionality": "mean_reverting", "volatility": "moderate", "samples": 100},
+        "meso_1h":  {"directionality": "mean_reverting", "volatility": "moderate", "samples": 200,
+                     "support_resistance": {"support": {"price": 99.0, "distance_pct": -0.01, "touches": 2},
+                                            "resistance": {"price": 101.0, "distance_pct": 0.01, "touches": 2}}},
+        "macro_1d": {"directionality": "mean_reverting", "volatility": "moderate", "samples": 60,
+                     "indicators": {}, "levels_macro": {}},
+        "history_required": {"available": True, "samples_micro": 100, "samples_meso": 200, "samples_macro": 60},
+    }
+
+
+def test_aggregate_counts_by_favorability():
+    payloads = {
+        "BTC-USDT": _per_pair_payload("BTC-USDT", "optimal"),
+        "ETH-USDT": _per_pair_payload("ETH-USDT", "suboptimal"),
+        "SOL-USDT": _per_pair_payload("SOL-USDT", "adverse"),
+        "XRP-USDT": _per_pair_payload("XRP-USDT", "adverse"),
+    }
+    agg = _compose_aggregate(payloads)
+    assert agg["counts"] == {"optimal": 1, "suboptimal": 1, "adverse": 2}
+    assert agg["pairs"] == ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT"]
+
+
+def test_aggregate_worst_picks_adverse():
+    payloads = {
+        "BTC-USDT": _per_pair_payload("BTC-USDT", "optimal"),
+        "ETH-USDT": _per_pair_payload("ETH-USDT", "adverse"),
+        "SOL-USDT": _per_pair_payload("SOL-USDT", "suboptimal"),
+    }
+    agg = _compose_aggregate(payloads)
+    assert agg["worst"]["pair"] == "ETH-USDT"
+    assert agg["worst"]["favorability"] == "adverse"
+
+
+def test_aggregate_worst_none_when_empty():
+    agg = _compose_aggregate({})
+    assert agg["worst"] is None
+    assert agg["pairs"] == []
+    assert agg["counts"] == {"optimal": 0, "suboptimal": 0, "adverse": 0}
+
+
+def test_aggregate_skips_empty_payloads():
+    payloads = {
+        "BTC-USDT": _per_pair_payload("BTC-USDT", "optimal"),
+        "FAIL-USDT": {},  # failed fetch
+    }
+    agg = _compose_aggregate(payloads)
+    assert "FAIL-USDT" not in agg["pairs"]
+    assert "BTC-USDT" in agg["pairs"]
+
+
+def test_aggregate_text_multi_pair():
+    payloads = {
+        "A-USDT": _per_pair_payload("A-USDT", "optimal"),
+        "B-USDT": _per_pair_payload("B-USDT", "adverse"),
+    }
+    agg = _compose_aggregate(payloads)
+    text = _aggregate_text(agg, payloads)
+    assert "2 pairs" in text
+    assert "🟢" in text or "🔴" in text
+    assert "worst" in text
+    assert "\n" not in text  # L2: single line
+
+
+def test_aggregate_text_single_pair_falls_back_to_per_pair():
+    payloads = {"BTC-USDT": _per_pair_payload("BTC-USDT", "optimal")}
+    agg = _compose_aggregate(payloads)
+    text = _aggregate_text(agg, payloads)
+    assert "BTC-USDT" in text
+    # Should NOT use the multi-pair "N pairs" prefix when only one is present.
+    assert "1 pairs" not in text
+
+
+def test_aggregate_kpi_sections_shape():
+    payloads = {
+        "A": _per_pair_payload("A", "optimal"),
+        "B": _per_pair_payload("B", "adverse"),
+    }
+    agg = _compose_aggregate(payloads)
+    kpis = _aggregate_kpi_sections(agg)
+    labels = [k["label"] for k in kpis]
+    assert labels == ["Pairs", "Optimal", "Suboptimal", "Adverse"]
+
+
+def test_aggregate_table_sorted_adverse_first():
+    payloads = {
+        "A": _per_pair_payload("A", "optimal"),
+        "B": _per_pair_payload("B", "adverse"),
+        "C": _per_pair_payload("C", "suboptimal"),
+    }
+    cols, rows = _aggregate_table(payloads)
+    assert "pair" in cols
+    # First row should be adverse.
+    assert "adverse" in rows[0]["favorability"]
+    # Last row should be optimal.
+    assert "optimal" in rows[-1]["favorability"]
+
+
+def test_agent_summary_shape():
+    payloads = {
+        "A": _per_pair_payload("A", "optimal"),
+        "B": _per_pair_payload("B", "adverse"),
+    }
+    agg = _compose_aggregate(payloads)
+    summary = _build_agent_summary(agg)
+    for key in ("ts", "pairs", "by_pair", "counts", "worst"):
+        assert key in summary
+    # by_pair has the minimal per-pair info, NOT the indicators
+    for pair_summary in summary["by_pair"].values():
+        assert "regime" in pair_summary
+        assert "favorability" in pair_summary
+        assert "indicators" not in pair_summary
+        assert "support_resistance" not in pair_summary
+
+
+# ---------------------------------------------------------------------------
+# Autodetect — mocked client
+# ---------------------------------------------------------------------------
+
+
+class _FakeBotOrch:
+    def __init__(self, bots: dict):
+        self._bots = bots
+
+    async def get_active_bots_status(self):
+        return {"data": {name: {} for name in self._bots}}
+
+
+class _FakeControllers:
+    def __init__(self, configs_by_bot: dict[str, list[dict]]):
+        self._configs = configs_by_bot
+
+    async def get_bot_controller_configs(self, bot_name: str):
+        return self._configs.get(bot_name, [])
+
+
+class _FakeClient:
+    def __init__(self, configs_by_bot: dict[str, list[dict]]):
+        self.bot_orchestration = _FakeBotOrch(configs_by_bot)
+        self.controllers = _FakeControllers(configs_by_bot)
+
+
+def test_autodetect_filters_by_connector():
+    client = _FakeClient({
+        "bot1": [
+            {"trading_pair": "BTC-USDT", "connector_name": "binance"},
+            {"trading_pair": "ETH-USDT", "connector_name": "binance_perpetual"},  # filtered out
+        ],
+        "bot2": [
+            {"trading_pair": "SOL-USDT", "connector_name": "binance"},
+        ],
+    })
+    pairs = asyncio.run(_autodetect_pairs(client, "binance"))
+    assert pairs == ["BTC-USDT", "SOL-USDT"]
+
+
+def test_autodetect_deduplicates():
+    client = _FakeClient({
+        "bot1": [{"trading_pair": "BTC-USDT", "connector_name": "binance"}],
+        "bot2": [{"trading_pair": "BTC-USDT", "connector_name": "binance"}],
+    })
+    pairs = asyncio.run(_autodetect_pairs(client, "binance"))
+    assert pairs == ["BTC-USDT"]
+
+
+def test_autodetect_empty_when_no_active_bots():
+    client = _FakeClient({})
+    pairs = asyncio.run(_autodetect_pairs(client, "binance"))
+    assert pairs == []
+
+
+def test_autodetect_handles_api_errors():
+    class _Failing(_FakeBotOrch):
+        async def get_active_bots_status(self):
+            raise RuntimeError("server down")
+
+    class _C:
+        bot_orchestration = _Failing({})
+        controllers = _FakeControllers({})
+
+    pairs = asyncio.run(_autodetect_pairs(_C(), "binance"))
+    assert pairs == []
