@@ -200,11 +200,13 @@
     - [x] 48 tests (whitelist, blacklist, controller_not_supported, coerce bool/int/float/list/string, optimistic-lock, validation graceful-degrade, api_error, atomic payload single-field, response shape, caveats)
     - [x] Smoke validado contra brigado: idempotent write OK, los 6 error paths funcionan
     - [x] L11 anotada: `validate_controller_config` rechaza `_config_name` inyectado por el GET — el graceful-degrade del tool maneja esto correctamente
-- [ ] **5.5** Crear el agent dir: `trading_agents/adaptive_pmm/`
-    - [ ] `agent.md` con la rule MVP de D5
-    - [ ] `policy.md` con reglas en prosa
-    - [ ] `invariants.yaml` con límites duros
-    - [ ] `state/` para memoria persistente
+- [x] **5.5** Crear el agent dir: `trading_agents/adaptive_pmm/`
+    - [x] `agent.md` con la rule MVP de D5 — frontmatter compatible con StrategyStore + body con scope/routines/policy/mode/output format. Condor lo autodescubre (verificado).
+    - [x] ~~`policy.md`~~ → la policy queda dentro del body del agent.md (sección "Policy"). El spec mismo embebe la policy en el body, no es archivo separado.
+    - [x] `invariants.yaml` con límites duros (24 allowed, 11 forbidden, 7 overrides, cooldowns, capital, modes)
+    - [x] `state/` con README + .gitkeep para memoria persistente
+    - [x] Loader/validator `condor/trading_agent/adaptive/invariants.py` con cross-check contra MCP tool metadata (F5 — fuente única de truth)
+    - [x] 36 tests del loader (file errors, required keys, type overlap, capital bounds, backtest enum, helpers, cross-check drift detection)
 - [ ] **5.6** Implementar handler de modo `propose` (Telegram inline buttons)
 - [ ] **5.7** Implementar modos `shadow` y `auto`
 

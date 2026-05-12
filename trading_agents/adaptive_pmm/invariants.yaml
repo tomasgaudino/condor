@@ -1,0 +1,219 @@
+# invariants.yaml — Hard limits for the Adaptive PMM Supervisor.
+#
+# The LLM cannot propose patches that violate any of these; the validator
+# (Phase 5.6) rejects offending proposals before they reach the human.
+#
+# This file is the **single source of truth** for the field whitelist and
+# blacklist (FIXES_2026-05-10.md F5). The MCP tool's
+# `_controller_field_metadata.py` mirrors this list — when they drift,
+# the validator at startup will warn and refuse to run until reconciled.
+#
+# Editing this file is intentional, deliberate, and should be reviewed.
+# `config.yml`/agent default_config is the place for user preferences;
+# `invariants.yaml` is for system-wide guardrails.
+
+version: "1.0"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Whitelist + blacklist
+# ─────────────────────────────────────────────────────────────────────
+
+# Fields the agent is allowed to write. Mirrors `is_updatable=True` from
+# the pmm_mister Pydantic schema.
+#
+# If you add a field here, also add it to the MCP tool's metadata module
+# (`mcp_servers/hummingbot_api/tools/_controller_field_metadata.py`). The
+# validator will refuse to load if these lists drift.
+allowed_fields:
+  # Spreads y amounts (immediate effect)
+  - buy_spreads
+  - sell_spreads
+  - buy_amounts_pct
+  - sell_amounts_pct
+
+  # Take profit (only affects new executors — known caveat, D5 MVP rule)
+  - take_profit
+  - take_profit_order_type
+  - open_order_type
+
+  # Inventory targets (hard cutoffs)
+  - target_base_pct
+  - min_base_pct
+  - max_base_pct
+  - min_skew
+
+  # Capital allocation (cross-checked by validate_no_oversub)
+  - portfolio_allocation
+  - total_amount_quote
+  - max_active_executors_by_level
+
+  # Timing
+  - executor_refresh_time
+  - buy_cooldown_time
+  - sell_cooldown_time
+  - buy_position_effectivization_time
+  - sell_position_effectivization_time
+
+  # Tolerances
+  - price_distance_tolerance
+  - refresh_tolerance
+  - tolerance_scaling
+
+  # Mode and protection
+  - tick_mode
+  - position_profit_protection
+
+
+# Absolute blacklist. Humano-only by policy (D7), even when technically
+# `is_updatable`. If a field is in both lists, blacklist wins.
+forbidden_fields:
+  - manual_kill_switch
+  - leverage
+  - connector_name
+  - trading_pair
+  - position_mode
+  - controller_name
+  - controller_type
+  - id
+  - _config_name
+  - global_take_profit
+  - global_stop_loss
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Global delta defaults
+# ─────────────────────────────────────────────────────────────────────
+
+# These defaults apply to every field in `allowed_fields` unless overridden
+# in `field_overrides` below.
+default_max_delta:
+  percentage_type:
+    max_increase: 0.5      # +50%
+    max_decrease: 0.5      # -50%
+  absolute_type:
+    max_increase: 0.10     # +10 percentage points
+    max_decrease: 0.10     # -10 percentage points
+
+
+# Type assignment per field — used by the deterministic expander (D9).
+field_type_map:
+  percentage_type:
+    - buy_spreads
+    - sell_spreads
+    - buy_amounts_pct
+    - sell_amounts_pct
+    - take_profit
+    - portfolio_allocation
+    - total_amount_quote
+    - executor_refresh_time
+    - buy_cooldown_time
+    - sell_cooldown_time
+    - buy_position_effectivization_time
+    - sell_position_effectivization_time
+    - price_distance_tolerance
+    - refresh_tolerance
+    - tolerance_scaling
+
+  absolute_type:
+    - target_base_pct
+    - min_base_pct
+    - max_base_pct
+    - min_skew
+    - max_active_executors_by_level
+
+  # Fields that are NOT scaled by a delta — the agent toggles them
+  # categorically. The deterministic expander treats them as
+  # `direction=switch, magnitude=n/a`.
+  categorical_type:
+    - tick_mode
+    - position_profit_protection
+    - take_profit_order_type
+    - open_order_type
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-field overrides (when the global default is too tight or too loose)
+# ─────────────────────────────────────────────────────────────────────
+
+field_overrides:
+  # Take profit can scale up aggressively — it's the MVP D5 rule.
+  take_profit:
+    type: percentage_of_current
+    max_increase: 2.0     # up to 3x
+    max_decrease: 0.5
+
+  # Spreads can double.
+  buy_spreads:
+    type: percentage_of_current
+    max_increase: 1.0
+    max_decrease: 0.5
+  sell_spreads:
+    type: percentage_of_current
+    max_increase: 1.0
+    max_decrease: 0.5
+
+  # Timing can widen significantly — slowing the bot is safe.
+  executor_refresh_time:
+    type: percentage_of_current
+    max_increase: 3.0
+    max_decrease: 0.5
+  buy_cooldown_time:
+    type: percentage_of_current
+    max_increase: 3.0
+    max_decrease: 0.5
+  sell_cooldown_time:
+    type: percentage_of_current
+    max_increase: 3.0
+    max_decrease: 0.5
+
+  # max_active_executors_by_level can drop a lot (soft kill).
+  max_active_executors_by_level:
+    type: absolute
+    max_increase: 5
+    max_decrease: 10
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Cooldowns (D4)
+# ─────────────────────────────────────────────────────────────────────
+cooldowns:
+  per_controller_minutes: 30
+  per_controller_per_field_minutes: 60
+  global_minutes: 5
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Capital safety (D9)
+# ─────────────────────────────────────────────────────────────────────
+capital:
+  safety_margin: 0.95               # max oversub_ratio allowed
+  block_increases_above_oversub: 0.85
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Circuit breaker (D7)
+# ─────────────────────────────────────────────────────────────────────
+circuit_breaker:
+  enabled: false                    # manual-only by default (D7)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Backtest (D9)
+# ─────────────────────────────────────────────────────────────────────
+backtest:
+  unsupported_connectors:
+    - hyperliquid
+    - dydx
+    - kraken
+    - coinbase_advanced_trade
+  on_backtest_failure: "block"      # block | allow_with_flag
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Auto mode (D4) — stricter limits when applying without human review
+# ─────────────────────────────────────────────────────────────────────
+auto_mode:
+  delta_multiplier: 0.5             # effective max_delta × 0.5
+  require_backtest_evidence: true   # backtest is non-optional
+  cooldown_multiplier: 2.0          # cooldowns × 2
