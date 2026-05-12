@@ -209,6 +209,214 @@ controllers.
 
 ---
 
+### Sesión vespertina (post-handoff) — MVP completo y activable
+
+Después del handoff de la mañana volvimos y, en lugar de cerrar, seguimos
+hasta cerrar el MVP completo. 5 commits adicionales que cierran fases
+5.6, 2.5 (implementación) y 5.7 + el runner que activa todo el framework.
+
+#### Lo que se hizo
+
+1. **Fase 5.6 — propose-mode handler** (commit `4e69fc2`).
+   - `condor/trading_agent/adaptive/audit.py`: lifecycle del audit_log
+     con atomic in-place update + last_changes con cooldown 3-tier
+     (per-field 60min / per-controller 30min / global 5min) + snooze
+     `cooldown_until` que extiende, + `expire_old_pending_proposals`
+     idempotente 24h.
+   - `handlers/adaptive/messages.py`: builders puros — callback data
+     (`adaptive:apply|reject|snooze:patch_id:[args]`), texto MarkdownV2
+     con escape correcto de dynamic data, keyboard winner-first +
+     alternativas + reject/snooze, mensajes post-verdict.
+   - `handlers/adaptive/__init__.py`: dispatcher con descubrimiento
+     automático del agent_dir owner del patch_id (filtra dirs con
+     invariants.yaml), double-click guard, apply/reject/snooze handlers
+     con state lifecycle completo + integración con la MCP tool de 5.4
+     + `send_proposal` API para que el orchestrator lo invoque.
+   - Registración en `main.py` con `pattern="^adaptive:"`.
+   - 94 tests nuevos (24 audit + 22 messages + 48 handler con fakes).
+
+2. **Fase 2.5 — Backtest Evidence Loop (implementación)** (commit `3322e51`).
+   - `expander.py`: tablas determinísticas por
+     percentage_type/absolute_type/categorical_type × small/medium/large
+     × increase/decrease. Clamp por invariants + clamp por dominio +
+     dedup con flag `clamped` sticky + drop no-ops iguales al current.
+   - `scoring.py`: `vol_norm + 0.3 * pnl_norm` con PnL<0 → -inf,
+     decomposition completa para audit. **Caveat documentado**: el
+     "baseline = 1.3" del spec solo se cumple cuando `baseline_pnl >= 1.0`
+     (en quote currency). Abajo de eso `max(., 1.0)` en el denominador
+     dampea pnl_norm — la check de "all worse" recibe el baseline real
+     como parámetro, no la constante.
+   - `backtest_cache.py`: sha256 sobre canonical config (excluyendo
+     `id`, `_config_name`, `created_at`, `updated_at`) + per-entry JSON
+     files + tiny index para cleanup diario.
+   - `backtest_loop.py`: orchestrator del ciclo con
+     `should_trigger_backtest_loop` (cheapest-first: paused →
+     not_suboptimal → regime_optimal → cooldowns_active),
+     `select_backtest_window` (floor 30min, no cap),
+     `run_backtest_cycle` con `asyncio.timeout(300)` + lock global
+     anti-engine-collision + verdict classification + write_anti_evidence.
+   - 66 tests (14 expander + 17 scoring + 13 cache + 22 loop).
+
+3. **Fase 5.7 — Tick orchestrator + shadow/auto modes** (commit `403e6a1`).
+   - `orchestrator.py`: `run_tick(ctx, agent_md_body)` con TODA dependencia
+     externa **inyectada** — testeable sin Telegram/Condor/claude-code.
+     Pre-flight (is_paused, expire_pending, daily_cache_cleanup) →
+     build_llm_prompt → parse_llm_response → loop por proposal:
+     invariants pre-check → backtest cycle → audit canónico (MEMORY_SPEC F6)
+     → action por modo:
+     * `propose`: usa `send_proposal` de 5.6.
+     * `shadow`: log-only, `human_verdict=shadow_logged`.
+     * `auto`: stricter check (`require_backtest_evidence`) + MCP apply
+       + last_changes upsert + audit `human_verdict=auto_applied`.
+   - 24 tests (paused, parsing variants, invariants, auto strict, los
+     3 modos con verdicts variados, fallos LLM/parsing).
+
+4. **Fix post-smoke** (commit `2f81431`). El smoke E2E reveló dos issues
+   del endpoint backtest del HB server. Ver L12 abajo.
+
+5. **`runner.py` — el activador real** (commit `794c91b`). CLI que junta
+   todo:
+   - `python -m condor.trading_agent.adaptive.runner <slug>
+     [--server N] [--mode shadow|propose|auto] [--llm real|mock-no-action|
+     mock-propose] [--once|--loop] [--max-ticks N]`.
+   - **Llama las funciones puras de las routines** (no `run()` que es
+     Telegram-side). Evita L5 (chat_id=0 server resolution bug)
+     fetcheando el cliente via `condor.tools.condor_inspect.with_client`.
+   - Mock LLM clients first-class: `mock-no-action` y `mock-propose`
+     son funciones puras testeables — clave para Fase 6 (smoke continuo
+     en shadow sin gastar tokens).
+   - `--mode` override desde CLI: indispensable para el workflow
+     shadow → propose → auto.
+   - `real` LLM stub con `NotImplementedError` claro — se separa
+     intencionalmente para no shippear un cliente real a medias.
+   - 17 tests + 2 smokes contra brigado (`mock-no-action` y
+     `mock-propose`). El segundo ejecutó baseline + 2 candidatos
+     reales para BTC-USDT, verdict `all_candidates_negative_pnl`
+     registrado en audit log canónico. **El framework está activable.**
+
+#### Decisiones operativas vespertinas
+
+- **Routines puras vs `run()`**: el runner llama
+  `_build_agent_payload`, `_compose_aggregate`, `_resolve_perf`, etc.
+  en lugar del entry point `run()` que recibe contexto Telegram. Evita
+  L5 y deja el agent dir limpio de side-effects de UI.
+- **Mocks LLM como first-class citizens**: `mock-no-action` y
+  `mock-propose` no son afterthought — son las herramientas que
+  permiten correr el ciclo completo contra brigado real sin gastar
+  tokens. Clave para Fase 6 (smoke continuo en `shadow` por N días).
+- **Modo override desde CLI**: `--mode shadow` fuerza shadow regardless
+  del agent.md. Workflow shadow → propose → auto requiere esto.
+- **Real LLM como pieza separada**: stub con `NotImplementedError`
+  hasta que esté wireado contra `condor.acp.client.AcpClient` con
+  sesión long-running. Mejor no shippear medio cliente.
+- **Auto-start desde main.py también separado**: si tiene un bug
+  bloquea Telegram. Mejor validar el runner standalone primero.
+- **Baseline score 1.3 aspiracional**: la fórmula del spec da 1.3
+  cuando `baseline_pnl >= 1.0` pero no abajo (max(.,1.0) en el
+  denominador dampea pnl_norm). Cambié
+  `all_candidates_worse_than_baseline` a aceptar el baseline real como
+  parámetro en lugar de usar la constante `BASELINE_SCORE`.
+- **Sticky `clamped` flag en el expander**: cuando la dedup tira un
+  candidato clampado que coincide con uno no-clampado, el survivor
+  hereda `clamped=True`. Así el report al humano dice "este valor fue
+  reached by a clamp" aunque el raw también haya caído ahí.
+
+#### Fricciones / aprendizajes (LEARNING L12 agregada)
+
+1. **Hurst R/S — formula correcta** (re-aprendido en el commit del
+   scoring/expander del backtest loop). Aplicarlo al precio da H≈0.9
+   para random walk porque integra ruido. La convención es sobre log
+   returns. Tres iteraciones para entenderlo bien al implementar 5.2
+   esta mañana; volví a tocarlo de pasada hoy.
+
+2. **`baseline_score = 1.3` no es invariante** (descubierto al
+   implementar scoring). El spec lo afirma pero la fórmula solo lo
+   garantiza si `baseline_pnl >= 1.0`. Anoté en el docstring para no
+   re-"corregir" la fórmula en una iteración futura.
+
+3. **Backtest endpoint asimétrico** (LEARNING L12 nueva). Mismo patrón
+   que L11 pero en otro endpoint:
+   - El server inyecta `_config_name` en el GET pero el modelo
+     Pydantic del backtest tiene `extra="forbid"` y lo rechaza.
+   - El endpoint NO levanta excepción — devuelve HTTP 200 con
+     `{"error": "..."}`. Mi loop trataba eso como "result with no
+     metrics" → verdict no_valid_candidates sin errors logged.
+   - Fix: strip `_`-prefijados antes de mandar + detectar
+     `{"error": ...}` sin `results` y convertirlo en BacktestError.
+   - **Lección meta**: para nuevos endpoints HB que validan con
+     Pydantic `extra="forbid"`, asumir que rechazarán los campos
+     `_*` que ellos mismos inyectan. Strip preventivo.
+
+4. **El framework existía pero nadie lo arrancaba** — el runner es
+   exactamente la pieza que faltaba para que todo lo construido fuera
+   un servicio real. Lección: para un sistema con muchas piezas
+   inyectadas, el entry point que junta todo NO es trivial y merece
+   su propio commit + tests + smoke.
+
+#### Estado final del MVP
+
+| Pieza | Estado |
+|---|---|
+| Fases 0-4 (specs + diseño) | ✅ |
+| Fase 2.5 implementación (backtest loop) | ✅ |
+| Fase 5.1-5.7 | ✅ |
+| Runner CLI + 2 smokes contra brigado | ✅ |
+| LLM `real` (ACP / pydantic-ai) | ⏸ stub con NotImplementedError claro |
+| Auto-start desde main.py | ⏸ pendiente |
+| Fase 6 (validación N días en shadow) | ⏸ depende de LLM real |
+
+12 LEARNINGS activos (L1-L12). 23 specs en `.planning/strategy-framework/`.
+
+#### Para retomar mañana
+
+**El siguiente deliverable concreto es `--llm real`**:
+
+1. Estudiar `condor.acp.client.AcpClient` — cómo abrir una sesión
+   long-running con el agente claude-code, mandarle el prompt del tick,
+   leer la respuesta. Mirar `handlers/agents/_shared.py` y
+   `handlers/agents/__init__.py` para ver el patrón con el que Condor
+   instancia clientes ACP hoy.
+2. Implementar `_build_real_llm_client(agent_key)` reemplazando el stub
+   en `runner.py`. Para `agent_key="claude-code"` → ACP. Para
+   `agent_key.startswith("openai:")` / `"ollama:"` → pydantic-ai
+   (mirar `condor/acp/pydantic_ai_client.py`).
+3. El cliente real probablemente tiene que ser **session-scoped**
+   (long-running por agente), no recreado por tick. Considerar mover
+   la creación del cliente fuera de `tick_once()` y pasarlo al runner
+   como argumento. `run_forever()` sería el dueño del ciclo de vida
+   de la sesión.
+4. Smoke test esperado:
+   `python -m condor.trading_agent.adaptive.runner adaptive_pmm
+   --server brigado --mode shadow --llm real --once`
+   debería devolver un proposal **del LLM real** (no del mock) y
+   correr el backtest cycle. Modo shadow así no toca Telegram.
+
+**Después de validar el LLM real**:
+- Integración con `main.py` (`asyncio.create_task` cuando
+  `adaptive.auto_start: true` en el default_config) — commit aparte.
+- Fase 6 (correr en shadow N días, mirar audit_log + anti_evidence_log
+  con datos reales, validar que las propuestas tienen sentido antes
+  de pasar a `propose` con humano en el loop).
+
+**Antes de tocar `--llm real`** — chequeo rápido recomendado: refrescar
+`controller_performance` un par de veces con el runner en shadow
+(--llm mock-no-action) para acumular history y salir de cold_start.
+Sin eso, cuando el LLM real corra va a recibir `cold_start` para
+todos los controllers y el output va a ser siempre `no_action`.
+
+#### Commits de la sesión vespertina
+
+- `4e69fc2` feat(handlers): adaptive propose-mode handler — phase 5.6 done
+- `3322e51` feat(adaptive): backtest evidence loop — Fase 2.5 implementation
+- `403e6a1` feat(adaptive): tick orchestrator + shadow/auto modes — Fase 5.7
+- `2f81431` fix(adaptive): backtest_loop strips _-prefixed fields + handles HTTP 200 error
+- `794c91b` feat(adaptive): runner — el activador del framework
+
+Tests totales al cierre vespertino: **533/533 passing** (era 354 al
+cierre matutino, +179 tests en la sesión vespertina).
+
+---
+
 ## 2026-05-10 · capital_state end-to-end + sistema de supervivencia entre sesiones
 
 **Contexto inicial**: arrancamos el día con el diseño completo (15 specs)
