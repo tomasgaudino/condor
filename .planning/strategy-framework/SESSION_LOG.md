@@ -16,6 +16,199 @@
 
 ---
 
+## 2026-05-12 · market_regime + controller_performance + MCP tool + agent dir (5.2 → 5.5)
+
+**Contexto inicial**: ayer cerramos capital_state end-to-end y el sistema
+de supervivencia entre sesiones. Hoy avanzamos 4 fases del MVP en una
+sola sesión: market_regime (5.2), controller_performance (5.3), la MCP
+tool update_controller_config (5.4), y el agent dir adaptive_pmm con
+su loader de invariants (5.5).
+
+### Lo que se hizo
+
+1. **Fase 5.2 — market_regime multi-pair** (commits `3c4ea4f`, `496af10`, `32380ac`, `cea7fab`, `8e6185f`, `ffd4cd3`).
+   - Contrato user/agent fijado en AGENT_VS_USER_VIEW.md ANTES de codear
+     (regla 4 del doc — primera vez aplicada en serio).
+   - Módulo de indicadores numpy/scipy (NATR, ATR, ADX, Bollinger, EMA
+     slopes, Hurst R/S, linreg) con 34 tests. Iteré el Hurst hasta
+     entender que va sobre log returns, no precio.
+   - Routine multi-pair con autodetect desde controllers activos
+     (default), override explícito via `trading_pairs: list[str]`.
+     Reporte único agregado: 4 KPIs + tabla resumen ordenada por
+     severidad + sub-sección por par con narrativa + niveles cercanos
+     S/R + niveles macro + glosario. Agent payloads per-pair
+     (~560 chars) + summary cross-pair (~720 chars).
+   - Smoke contra brigado: detectó BTC-BRL, BTC-USDT, TON-USDT, los 3
+     en 🔴 adverse en este momento (BTC bajando ~1.23% diario).
+
+2. **Bug visual del report multi-pair → fix + LEARNINGS L9/L10**
+   (commits `ffd4cd3`, `5fea9f6`).
+   - User reportó tablas sin label de par y "falsa navegación" con TOC
+     markdown anchors.
+   - Root cause: `ReportBuilder._render_sections` por defecto reordena
+     por tipo (kpi → plotly → table → markdown), desacoplando tablas
+     de sus headers.
+   - Fix: `builder.manual_order()` + columna `pair` como primera de
+     cada tabla TF (safety net) + integración de niveles + S/R dentro
+     del mismo markdown block del par + remoción de la TOC falsa.
+   - L9 anotada (manual_order siempre que el orden importe) + L10
+     (no contaminar reports/ con datos sintéticos — el 100/101 del
+     gráfico de BTC fue un fixture mío que se persistió y confundió).
+
+3. **Fase 5.3 — controller_performance** (commit `ca461c9`).
+   - Smoke previo descubrió que el response real NO tiene
+     `total_positions` ni `accuracy` (spec asumía). Derivamos
+     `positions_closed = sum(close_type_counts)`, `accuracy=null` en MVP.
+     `close_type_counts` viene como `"CloseType.TAKE_PROFIT"` —
+     normalizamos a `take_profit`.
+   - Multi-controller con autodetect, mismo patrón que market_regime.
+     Ventanas 1h/6h/24h via state_io JSONL (30d rotation).
+     Cold-start F3 (cold_start <30min, adaptive 30min-4h, normal ≥4h).
+     `market_share_24h` via `get_candles` 1h × 24.
+   - 48 tests + smoke contra brigado: 14 controllers detectados, agent
+     payloads 900-916 chars per-ctrl + 462 chars summary. Verifico
+     que el JSONL persistido coincide con el snapshot en vivo.
+
+4. **Fase 5.4 — MCP tool update_controller_config** (commit `e88bd17`).
+   - Wrapper estricto sobre `update_bot_controller_config` con
+     whitelist (silent-write protection), blacklist absoluta (D7),
+     type coercion contra `type(old_value)`, optimistic-lock con
+     tolerancia float, caveats automáticos.
+   - Atomicidad confirmada: idempotent write contra brigado dejó los
+     34 campos del controller bit-idénticos.
+   - 6 paths del algoritmo validados contra brigado en vivo
+     (success, field_forbidden, field_not_updatable,
+     value_changed_externally, bot_not_found, controller_not_found).
+   - L11 nueva: el endpoint `validate_controller_config` rechaza el
+     `_config_name` que `get_bot_controller_configs` inyecta —
+     `extra_forbidden` asimétrico. El tool ya implementa graceful-
+     degrade (log warning, proceder al apply); la lección documenta
+     no "arreglar" eso abortando en la validación.
+   - 48 tests (12 metadata + 36 tool).
+
+5. **Fase 5.5 — agent dir + invariants loader** (commit `91fc011`).
+   - `trading_agents/adaptive_pmm/` con `agent.md` (frontmatter
+     compatible con StrategyStore + body con scope/routines/policy/
+     mode/output format de D5), `invariants.yaml` (24 allowed, 11
+     forbidden, 7 overrides, cooldowns, capital, modes), `state/`
+     con README + .gitkeep.
+   - `condor.trading_agent.adaptive.invariants` loader con cross-check
+     contra MCP tool metadata (F5). Detecta drift silent-write +
+     forbidden mismatch + fields sin type. Acepta la asimetría
+     intencional de `leverage` (humano-only por política aunque sea
+     `is_updatable`).
+   - Nuevo bucket `categorical_type` en field_type_map para fields
+     toggle (tick_mode, position_profit_protection, *_order_type).
+   - 36 tests del loader. Condor autodescubre el nuevo agente
+     ("Adaptive PMM Supervisor", `adaptive.mode=propose`).
+
+### Decisiones operativas
+
+- **Multi-entity por default**: las 3 routines del framework (capital_state,
+  market_regime, controller_performance) emiten vista agregada para humano
+  + per-entity agent payloads. El engine futuro filtra por
+  `title.startswith("agent:")`. Esto permite que el agente itere por
+  controller sin recibir un payload monstruoso.
+- **Atomicidad via shallow merge**: validada contra brigado escribiendo
+  el mismo valor que ya tenía — 33 campos restantes intactos. Base
+  fundacional del MCP tool: pasar `{field: value}` (single-field) es
+  atómico naturalmente.
+- **Categorical fields en invariants**: agregamos un tercer bucket
+  (`categorical_type`) para fields toggle. El expander determinístico
+  de D9 va a tratarlos como `direction=switch, magnitude=n/a` en lugar
+  de escalarlos con delta. Decisión tomada al cierre de 5.5.
+- **`policy.md` separado descartado**: el spec lo mencionaba pero el
+  spec mismo embebe la policy en el body de agent.md. Mantenido todo
+  en un solo archivo, más simple para el wizard que va a editar la
+  sección "User-defined rules".
+- **Estado en root vs agent dir**: routines persisten en
+  `state/<routine>/...` (repo root) por ahora. Cuando llegue el agent
+  loop (5.6), migrar a `trading_agents/adaptive_pmm/state/<routine>/`.
+  Documentado en `trading_agents/adaptive_pmm/state/README.md`.
+
+### Fricciones / aprendizajes
+
+1. **Hurst R/S sobre precio vs returns**. Aplicarlo al precio da H≈0.9
+   para un random walk porque integra el ruido. La convención del
+   estimador es sobre log-returns. Tres iteraciones para entenderlo.
+   Anoté en docstring para futuras-yo.
+
+2. **ReportBuilder reordering** (L9). El usuario me ahorró tiempo
+   reportando el render roto con screenshot — diagnosticar a partir
+   de "veo tablas sin header" me llevó directo a `sorted(sections,
+   key=_SECTION_PRIORITY)`. La columna `pair` como red de seguridad
+   es la lección operativa: cuando una tabla está semánticamente
+   atada a una entidad, prefijar la entidad.
+
+3. **Contaminé reports/ con fixture sintético** (L10). Smoke local
+   con `make_candles(price=100.0)` se persistió como report real en
+   la web UI. Usuario lo detectó comparando con TradingView. Lección:
+   tempfile para tests que tocan el sistema de archivos compartido,
+   o saltearse `_save_report` y solo verificar el `RoutineResult`.
+
+4. **`validate_controller_config` rechaza `_config_name`** (L11). El
+   GET lo inyecta, el VALIDATE lo rechaza con `extra_forbidden`.
+   Asimetría del server. El graceful-degrade del tool (log + proceder
+   al apply) es la respuesta correcta — si el tool abortara en
+   validation_failed, el agente no podría escribir nada.
+
+### Estado al cerrar
+
+- Branch: `feat/pmm_mister_supervisor`.
+- 354/354 tests passing (era 136 al arranque de hoy, +218).
+- 10 commits ahead de `drupman/feat/pmm_mister_supervisor` (push hecho
+  al final del handoff).
+- Working tree limpio salvo `frontend/package-lock.json` (archivo ajeno
+  que el frontend siempre toca; ignorar — L6).
+- Fase 5: 5/7 done (5.1 ✓ 5.2 ✓ 5.3 ✓ 5.4 ✓ 5.5 ✓ · 5.6 5.7 pendientes).
+- 11 LEARNINGS activos (L1-L11).
+- Agente nuevo `Adaptive PMM Supervisor` autodescubrible por
+  StrategyStore con `adaptive.mode=propose`.
+
+### Para retomar mañana
+
+**El próximo paso es Fase 5.6 — modo `propose`** (handler de Telegram
+con inline buttons). Es la pieza orquestadora que junta TODO lo
+construido:
+
+1. Tick del agente (cada 600s — `frequency_sec` del default_config).
+2. Llamar a las 3 routines, extraer `agent:summary` + per-entity views.
+3. Construir el prompt: `agent.md` body + capital_state.agent +
+   market_regime.agent:<pair> + controller_performance.agent:<controller>.
+4. Parsear la respuesta JSON del LLM (no_action | propose).
+5. Validar cada propuesta contra `invariants.yaml` (whitelist,
+   deltas, cooldowns, capital). Usar
+   `condor.trading_agent.adaptive.invariants` + el loader.
+6. Pasar las que sobrevivan al **Backtest Evidence Loop** (Fase 2.5,
+   ya especificado en BACKTEST_LOOP_SPEC.md).
+7. Para las que pasen el backtest: mensaje a Telegram con
+   `propose_chat_id` + inline buttons `[Apply <winner>] [Apply <alt>]
+   [Reject] [Snooze]`. PROPOSE_MODE_SPEC.md tiene el layout exacto.
+8. Handler de callbacks: aplica via la MCP tool de 5.4 + escribe al
+   `state/audit_log.jsonl`.
+
+**Antes de codear 5.6**, agendaría el routine `controller_performance`
+en la web UI con `Schedule` para que vaya acumulando snapshots. En 4h
+sale de cold_start y va a tener velocidades reales que el agente
+realmente pueda usar para detectar suboptimal. Sin eso, el primer Run
+del agente va a tirar `no_action` por cold_start en todos los
+controllers.
+
+### Commits del día
+
+- `3c4ea4f` docs(planning): lock market_regime user/agent contract before coding
+- `496af10` feat(adaptive): numpy-only technical indicators for market_regime
+- `32380ac` feat(routines): market_regime — multi-timeframe regime classifier
+- `cea7fab` docs(planning): mark phase 5.2 (market_regime) done in TASKS.md
+- `8e6185f` feat(routines): market_regime — multi-pair with autodetect
+- `ffd4cd3` fix(routines): market_regime multi-pair report layout
+- `5fea9f6` docs(planning): LEARNINGS L9 + L10 from today's UI rendering issues
+- `ca461c9` feat(routines): controller_performance — phase 5.3 done
+- `e88bd17` feat(mcp): adaptive update_controller_config — phase 5.4 done
+- `91fc011` feat(agent): adaptive_pmm agent dir + invariants loader — phase 5.5 done
+
+---
+
 ## 2026-05-10 · capital_state end-to-end + sistema de supervivencia entre sesiones
 
 **Contexto inicial**: arrancamos el día con el diseño completo (15 specs)
