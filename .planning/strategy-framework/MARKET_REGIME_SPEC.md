@@ -315,7 +315,7 @@ Esto es lo que el LLM lee para elegir qué tocar. No le decimos los valores — 
 class Config(BaseModel):
     """Multi-timeframe market regime classifier."""
     trading_pair: str = Field(default="BTC-USDT")
-    connector_name: str = Field(default="binance_perpetual")
+    connector_name: str = Field(default="binance")  # spot; pmm_mister no usa perps
     
     # Timeframes (configurables — defaults razonables)
     micro_interval: str = Field(default="5m")
@@ -408,6 +408,30 @@ La routine es stateless en el cómputo — todos los inputs vienen del mercado y
 - **Regime change detection**: alertar específicamente en transiciones (no solo reportar persistencia).
 - **Tunear los thresholds** con datos reales después de N días de operación.
 - **Microestructura** (orderbook spread, OFI, tick rate) — fuera del MVP, requiere fuente de datos distinta de candles.
+
+## Shape real del response del SDK (validado 2026-05-12)
+
+`client.market_data.get_candles(connector_name, trading_pair, interval,
+max_records)` devuelve **`list[dict]`** (sin envoltorio), ordenada
+ascendente por `timestamp`. Cada dict tiene:
+
+```
+timestamp (float, epoch seconds, UTC)
+open, high, low, close (float)
+volume                 (base asset)
+quote_asset_volume     (quote / USD — usar este para volume_today_vs_avg30)
+n_trades               (float — viene como float aunque sea integer)
+taker_buy_base_volume
+taker_buy_quote_volume
+```
+
+Connector default: **`binance` (spot)**. Los `pmm_mister` no usan
+perps — confirmado por el usuario en sesión 2026-05-12.
+
+Campos disponibles pero **fuera del MVP** (candidatos post-MVP):
+- `taker_buy_quote_volume / quote_asset_volume` → taker imbalance, sirve
+  para desempatar direccionalidad en regímenes ambiguos.
+- `n_trades` → posible reemplazo de volume en pares ilíquidos.
 
 ## Próximos pasos
 

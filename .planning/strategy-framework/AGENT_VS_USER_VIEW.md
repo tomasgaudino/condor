@@ -175,15 +175,143 @@ agent_view = next(
 
 ---
 
-### `market_regime` (no implementada todavía)
+### `market_regime` (en diseño, próxima a implementar)
 
-Pendiente. Cuando se implemente, agregar acá:
+> Contrato diseñado antes de codear, siguiendo la regla 4 del doc.
+> Spec base de cómputo: `MARKET_REGIME_SPEC.md` (no se duplica acá).
+> El connector default es **`binance` (spot)** — los `pmm_mister`
+> corren ahí, perps fuera de scope.
 
-- **User view**: regímenes por timeframe (5m/1h/1d), favorability, niveles
-  S/R, indicadores con explicación.
-- **Agent view (esperado)**: solo el régimen canónico, favorability,
-  trigger_candidates, persistence_minutes, confidence. Sin narrativa de
-  cómo se llegó al régimen.
+#### User view
+
+Compone:
+- **`text`** — 1 línea ASCII tipo
+  `"BTC-USDT · mean_rev_high_vol · 🟡 suboptimal · conf=hi · 47m"`.
+  Orden: pair → régimen canónico → emoji+favorability → confianza →
+  persistencia. ASCII puro, sin backticks (L2).
+- **4 KPI cards** (`type="kpi"`):
+  - REGIME (`mean_rev_high_vol`, delta=régimen anterior si transitó
+    en este tick).
+  - FAVORABILITY (🟢 optimal / 🟡 suboptimal / 🔴 adverse,
+    trend=up/down vs tick anterior).
+  - CONFIDENCE (high/med/low, sin delta).
+  - PERSISTENCE (`47m`, trend=up = se sostiene; reset a 0 = transición).
+- **Tabla por timeframe** (`table_data` + `table_columns`):
+  3 filas (micro/meso/macro), columnas
+  `timeframe, directionality, volatility, key_indicator, value, regime_local`.
+  El "key indicator" por fila es el más explicativo: NATR para micro,
+  Hurst para meso, position_in_range_30d para macro.
+- **Report HTML persistido** (`ReportBuilder.save()` — L3) con:
+  KPIs → narrativa → tabla → bloque S/R con distancia al precio →
+  glosario contextual.
+- **Narrativa**: 2-5 frases determinísticas en castellano, status
+  🟢/🟡/🔴 según `favorability`. Casos especiales:
+  - Trending con pullback: mencionar explícitamente que el macro va
+    contra la lectura del micro (es uno de los lugares donde la routine
+    agrega valor — spec MARKET_REGIME §"Por qué la excepción").
+  - Confidence=low: incluir disclaimer del lookback insuficiente.
+- **Glosario**: 5 términos base (régimen, favorabilidad, NATR, Hurst,
+  persistencia) + condicionales:
+  - `trending_with_pullback` si aplica.
+  - `support/resistance` si hay niveles cercanos (< 1% del precio).
+  - `random_walk` si aparece en algún timeframe.
+  - `position_in_range_30d` solo si > 0.85 o < 0.15 (zonas extremas).
+
+#### Agent view
+
+```json
+{
+  "ts": "2026-05-12T14:32:18Z",
+  "pair": "BTC-USDT",
+  "connector": "binance",
+  "regime": "mean_reverting_high_vol",
+  "favorability": "suboptimal",
+  "confidence": "high",
+  "persistence_minutes": 47,
+  "bias": null,
+  "trigger_candidates": ["take_profit", "spreads"],
+  "by_timeframe": {
+    "micro_5m":  {"dir": "mean_reverting", "vol": "high"},
+    "meso_1h":   {"dir": "mean_reverting", "vol": "moderate"},
+    "macro_1d":  {"dir": "trending_up",    "vol": "moderate"}
+  },
+  "key_levels": {
+    "support_distance_pct": -0.006,
+    "resistance_distance_pct": 0.008
+  },
+  "history_available": true
+}
+```
+
+#### Diferencias explícitas user → agent
+
+| Campo del payload completo | En user view | En agent view |
+|---|---|---|
+| `micro_5m.indicators.*` (NATR, BB, EMA slopes, ADX, realized_vol) | ✅ (tabla + glosario) | ✗ (el régimen ya resume la decisión) |
+| `meso_1h.indicators.*` (Hurst, linreg, ATR, EMA slope) | ✅ | ✗ |
+| `macro_1d.indicators.*` (volume ratio, range, vol30d, position_in_range) | ✅ | ✗ |
+| `micro_5m.vol_history_24h` (p33/p67) | ✅ (debug / drilldown) | ✗ |
+| `meso_1h.support_resistance.{support,resistance}.price` | ✅ | ✗ (el agente no opera con precios absolutos) |
+| `meso_1h.support_resistance.*.distance_pct` | ✅ | ✅ (renombrado a `key_levels.*`) |
+| `meso_1h.support_resistance.*.touches` | ✅ | ✗ (calidad del nivel solo importa al humano) |
+| `macro_1d.levels_macro` (high/low 7d/30d/90d) | ✅ | ✗ (no son palancas del MVP) |
+| `summary.canonical_regime` | ✅ | ✅ (renombrado a `regime`) |
+| `summary.favorability/confidence/persistence_minutes/bias` | ✅ | ✅ |
+| `summary.trigger_candidates` | ✅ (en narrativa) | ✅ (lista cruda) |
+| `by_timeframe.*` con dir/vol por TF | ✅ (tabla) | ✅ (mínimo — el LLM puede razonar "macro va contra micro" sin tener todos los indicadores) |
+| Narrativa, glosario | ✅ | ✗ |
+| `history_required.samples_*` | ✅ (drilldown) | ✗ — solo el flag `history_available` |
+| Régimen anterior (delta para KPI) | ✅ | ✗ (el agente ya tiene `persistence_minutes`; basta) |
+
+#### Campos del SDK descubiertos en smoke test (2026-05-12)
+
+El response real de `client.market_data.get_candles(...)` es una
+**`list[dict]`** (no un dict envoltorio) ordenada **ascendente** por
+timestamp, con campos:
+
+```
+timestamp, open, high, low, close, volume,
+quote_asset_volume, n_trades,
+taker_buy_base_volume, taker_buy_quote_volume
+```
+
+Implicancias:
+- `quote_asset_volume` permite computar `volume_today_vs_avg30`
+  **en USD** sin tener que multiplicar por mid-price. Mejora la
+  comparabilidad entre pares y la robustez ante saltos de precio.
+- `taker_buy_quote_volume / quote_asset_volume` da un "taker imbalance"
+  que sirve para desempatar direccionalidad en regímenes ambiguos.
+  **No entra al MVP** — anotado como candidato post-MVP.
+- `n_trades` (count de trades por candle) podría reemplazar volume en
+  pares ilíquidos. Mismo status: anotado, no MVP.
+
+#### Tamaño esperado
+
+- **User view (HTML report)**: ~3-8 KB por snapshot.
+- **Agent view (JSON)**: ~400-600 chars (10× más chico que
+  `capital_state`, intencional — `market_regime` es un input chico de
+  alta densidad informativa).
+
+#### Helper que lo construye
+
+`routines/market_regime.py::_build_agent_payload(payload)` — función
+pura, testeada con N tests (TBD durante implementación).
+
+#### Cómo el engine del agente lo consume
+
+Idéntico a `capital_state`:
+
+```python
+result = await market_regime_run(config, ctx)
+agent_view = next(
+    s["data"] for s in (result.sections or [])
+    if s.get("type") == "data" and s.get("title") == "agent"
+)
+```
+
+El agente combina `capital_state.agent_view` + `market_regime.agent_view`
+en su prompt. Tamaño total esperado del bloque "market context" en el
+prompt: <7 KB (decenas de pares posibles si fuera multi-pair futuro).
 
 ### `controller_performance` (no implementada todavía)
 
