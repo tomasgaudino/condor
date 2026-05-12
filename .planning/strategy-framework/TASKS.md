@@ -105,6 +105,14 @@
 
 ## Fase 2.5 — Backtest Evidence Loop ✅ → `BACKTEST_LOOP_SPEC.md`
 
+> Spec ✅ y **implementación ✅** (commit ad-hoc del 2026-05-12):
+> - `condor/trading_agent/adaptive/expander.py` — expansor determinístico
+> - `condor/trading_agent/adaptive/scoring.py` — score + decomposition + winner
+> - `condor/trading_agent/adaptive/backtest_cache.py` — sha256 cache + cleanup
+> - `condor/trading_agent/adaptive/backtest_loop.py` — orchestrator + anti-evidence
+> - 66 tests nuevos
+
+
 > Capa de evidencia empírica antes de proponer al humano. Ver D9 en DECISIONS.md.
 
 - [x] **2.5.1** Disparador del ciclo de backtest
