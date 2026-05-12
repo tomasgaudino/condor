@@ -182,7 +182,17 @@
     - [x] Dos vistas: user (KPIs+tabla+narrativa+glosario+report HTML) y agent (~560 chars)
     - [x] 39 tests + smoke validado contra brigado (BTC-USDT, ETH-USDT)
     - [ ] Persistence_minutes (regime_history.jsonl): se completa cuando el agente lea el output. Por ahora None.
-- [ ] **5.3** Implementar `routines/controller_performance.py` (D10)
+- [x] **5.3** Implementar `routines/controller_performance.py` (D10)
+    - [x] Multi-controller con autodetect (mismo patrón que market_regime multi-pair)
+    - [x] Snapshot + velocidades sobre 1h/6h/24h via state_io JSONL append-only (30d rotation)
+    - [x] Cold-start (F3): cold_start <30min · adaptive 30min-4h · normal ≥4h
+    - [x] Diagnóstico: pnl_flat / volume_dropping / stuck / suboptimal_now / time_since_last_fill
+    - [x] Market_share_24h via get_candles 1h × 24 (quote_asset_volume sum)
+    - [x] Dos vistas: aggregate user + per-controller agent payloads (~900 chars c/u, summary ~460)
+    - [x] Reporte HTML con manual_order (L9) — KPIs + tabla resumen + sub-secciones por controller
+    - [x] 48 tests + smoke validado contra brigado (14 controllers)
+    - [ ] `suboptimal_period_minutes` real (requiere tracking de transiciones, igual que `persistence_minutes` de market_regime — se completa cuando el agente lea el output)
+    - [ ] `accuracy`, `adverse_fill_ratio`, `gross_spread_captured` — fuera del MVP (requieren PnL por position histórico o data de price post-fill)
 - [ ] **5.4** Implementar la MCP tool `update_controller_config`
 - [ ] **5.5** Crear el agent dir: `trading_agents/adaptive_pmm/`
     - [ ] `agent.md` con la rule MVP de D5

@@ -357,15 +357,170 @@ El agente combina `capital_state.agent_view` + `market_regime.agent_view`
 en su prompt. Tamaño total esperado del bloque "market context" en el
 prompt: <7 KB (decenas de pares posibles si fuera multi-pair futuro).
 
-### `controller_performance` (no implementada todavía)
+### `controller_performance` (en implementación · multi-controller)
 
-Pendiente. Cuando se implemente, agregar acá:
+> Spec base de cómputo: `CONTROLLER_PERFORMANCE_SPEC.md`.
+> Mismo patrón multi-entity que `market_regime`: por defecto opera
+> sobre **todos** los controllers activos del server; lista explícita
+> via `controller_ids: list[str]` para single-controller / filtrado.
+> Output agregado para el humano + per-controller agent views.
 
-- **User view**: tabla por controller con PnL/volume/market share por
-  ventana, gráficos de evolución temporal.
-- **Agent view (esperado)**: por controller `pnl_velocity`,
-  `volume_velocity`, `subóptimo_now`, `time_since_last_fill`,
-  `period_subóptimo_minutes`. Sin formato.
+#### Desviaciones vs spec (validadas contra brigado 2026-05-12)
+
+El response real de `bot_orchestration.get_active_bots_status` NO
+incluye los campos que el spec asume (`total_positions`, `accuracy`).
+Lo que sí viene en `controller.performance.*`:
+
+```
+realized_pnl_quote, unrealized_pnl_quote, unrealized_pnl_pct,
+realized_pnl_pct, global_pnl_quote, global_pnl_pct,
+volume_traded, positions_summary[], close_type_counts{}
+```
+
+`close_type_counts` viene con keys `"CloseType.TAKE_PROFIT"` (el
+enum stringified). Las normalizamos a `take_profit`, `early_stop`,
+`position_hold`, etc.
+
+Derivaciones que reemplazan campos faltantes:
+- `total_positions_closed` = `sum(close_type_counts.values())`.
+- `total_positions_open`   = `len(positions_summary)`.
+- `accuracy` ≡ `null` en MVP. Computarlo requiere PnL realizado por
+  position **histórico** (ver pendientes); el snapshot solo expone PnL
+  realizado del controller, no por position.
+- `close_types_dominant` = key con max value tras strip de `"CloseType."`.
+
+#### Persistencia (MVP)
+
+`state/controller_performance/<canonical_id>.jsonl`, append-only,
+1 snapshot por Run, rotación 30 días (mismo patrón que `capital_state`).
+Schema de cada línea:
+
+```json
+{"ts": "...", "r_pnl": 12.42, "u_pnl": -11.48, "vol": 316717.16, "pos_closed": 2383}
+```
+
+El `<canonical_id>` es `{bot_name}::{_config_name}` (L1) sanitizado
+para filesystem con `::` → `__` (helper `state_io.canonical_id_to_filename`).
+
+Cuando llegue Fase 5.5 (agent dir) este path se moverá a
+`trading_agents/<agent>/state/controller_performance/`. Por ahora
+queda en la raíz para no acoplar la routine al agente que aún no
+existe.
+
+#### User view
+
+Compose:
+- **`text`** — 1 línea ASCII agregada:
+  `"14 ctrl · 8 stuck? · 3 subopt · worst: btcusdt-1-5 PnL -2.3%"`.
+- **4 KPI cards** agregadas:
+  - CONTROLLERS (count total).
+  - SUBOPTIMAL (count + delta `% del total`).
+  - STUCK (count, trend `down` si > 0).
+  - PNL 24h (sum across controllers en USD, trend según signo).
+- **Tabla agregada** (`table_data` + `table_columns`):
+  1 fila por controller, columnas
+  `controller, pair, pnl_24h, vol_24h, pos_closed, fills/h_1h, last_fill_min, flags`
+  donde `flags` resume `stuck/subopt/cold_start` con emojis.
+  Ordenada con `suboptimal_now` arriba (atención humana).
+- **Report HTML persistido** (`ReportBuilder.save()` — L3, con
+  `manual_order()` por L9):
+  1. 4 KPIs agregadas.
+  2. Resumen narrativo (1-2 frases).
+  3. Tabla resumen.
+  4. Sub-sección por controller (`## <bot::config>`):
+     - bullets: pair, régimen del controller, warmup_status, dominant close type.
+     - mini-tabla de ventanas (`last_1h / last_6h / last_24h`) con
+       `r_pnl, u_pnl, net_pnl, vol, vel_pnl, vel_vol, fills/h, last_fill_min`.
+     - market_cross block (market_share_24h) si `compute_market_share=True`.
+     - flags del diagnóstico.
+  5. Glosario único al final.
+
+#### Agent view (per-controller, multiple sections)
+
+Igual que `market_regime`: una sección por controller con
+`title="agent:<canonical_id>"` + una sección `agent:summary`. El
+engine futuro filtra por `title.startswith("agent:")` y pasa al LLM
+solo el del controller que está evaluando.
+
+Shape per-controller:
+
+```json
+{
+  "ts": "...",
+  "controller_id": "{bot_name}::{config_name}",
+  "trading_pair": "BTC-USDT",
+  "windows": {
+    "last_1h":  {"pnl_velocity": ..., "volume_velocity": ..., "fills_per_hour": ..., "samples": 6, "available": true},
+    "last_6h":  {...},
+    "last_24h": {...}
+  },
+  "snapshot": {
+    "realized_pnl_quote": 12.42,
+    "unrealized_pnl_quote": -11.48,
+    "net_pnl_quote": 0.93,
+    "volume_traded": 316717.16,
+    "positions_open": 1,
+    "positions_closed": 2383
+  },
+  "market_cross": {
+    "market_share_24h": 0.0024
+  },
+  "diagnostic": {
+    "is_pnl_flat": false,
+    "is_volume_dropping": false,
+    "is_stuck": false,
+    "suboptimal_now": false,
+    "suboptimal_period_minutes": 0,
+    "warmup_status": "normal",
+    "effective_window_key": "last_4h",
+    "effective_window_hours": 4.0,
+    "close_types_dominant": "take_profit",
+    "time_since_last_fill_minutes": 2.3
+  }
+}
+```
+
+`agent:summary`:
+
+```json
+{
+  "ts": "...",
+  "controllers": ["bot1::c1", "bot1::c2", ...],
+  "counts": {"suboptimal_now": 3, "stuck": 8, "cold_start": 2},
+  "worst": {"controller_id": "bot1::c5", "pnl_velocity_24h_norm": -0.003}
+}
+```
+
+#### Diferencias explícitas user → agent
+
+| Campo del payload completo | User view | Agent view |
+|---|---|---|
+| `windows[i].realized_pnl_quote`/`unrealized_pnl_quote` | ✅ (tabla por TF) | ✗ (el agente decide con velocidades, no con totales) |
+| `windows[i].volume_traded`, `total_positions_closed/open` | ✅ | ✗ |
+| `windows[i].pnl_velocity*`, `volume_velocity`, `fills_per_hour` | ✅ | ✅ |
+| `market_cross.exchange_volume_24h_quote`, `controller_volume_24h_quote` | ✅ | ✗ (la decisión solo necesita `market_share`) |
+| `market_cross.market_share_24h` | ✅ | ✅ |
+| `diagnostic.*` completo | ✅ | ✅ (entero — el LLM razona con todos los flags) |
+| `close_type_counts` cruda | ✅ (drilldown) | ✗ (solo el dominante) |
+| `close_types_dominant` | ✅ | ✅ (en diagnostic) |
+| `positions_summary[]` cruda | ✅ (debug) | ✗ (lo procesa `capital_state`) |
+| Narrativa, glosario, KPIs renderizados | ✅ | ✗ |
+| `snapshot_for_history` (los 4 campos persistidos) | ✗ (interno) | ✗ |
+
+#### Helper que lo construye
+
+`routines/controller_performance.py::_build_agent_payload(ctrl_payload)`
+para per-controller; `_build_agent_summary(aggregate)` para el resumen
+cross-controller.
+
+#### Tamaño esperado
+
+- User view (HTML report): ~10-30 KB para 14 controllers.
+- Agent view per-controller: ~500-700 chars.
+- Agent summary: ~500 chars con 14 controllers.
+- Total payload del LLM (1 controller en evaluación): ~2 KB
+  (`agent:<id>` + `agent:summary` + `capital_state.agent` +
+  `market_regime.agent:<pair>`).
 
 ---
 
