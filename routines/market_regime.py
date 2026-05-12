@@ -1268,6 +1268,11 @@ def _save_multi_pair_report(
     title_pairs = ", ".join(pairs[:3]) + (f" +{len(pairs) - 3}" if len(pairs) > 3 else "")
     builder = ReportBuilder(f"Market Regime — {title_pairs} — {aggregate['ts']}")
     builder.source("routine", "market_regime").tags(["adaptive_framework", "regime", "multi_pair"])
+    # IMPORTANT: keep the insertion order. Without this, ReportBuilder
+    # re-sorts all sections so every table goes before every markdown,
+    # which decouples per-pair tables from their headers and produces
+    # the broken layout we saw on 2026-05-12.
+    builder.manual_order()
 
     # 4 aggregate KPIs.
     for k in _aggregate_kpi_sections(aggregate):
@@ -1285,17 +1290,16 @@ def _save_multi_pair_report(
             f"El más crítico es **{worst['pair']}** ({worst['favorability']})."
         )
 
-    # Tabla resumen.
+    # Tabla resumen (agregada por par).
     cols, rows = _aggregate_table(payloads_by_pair)
     if rows:
-        builder.markdown("## Por par")
+        builder.markdown("## Resumen por par")
         builder.table(rows, columns=cols)
 
-    # TOC con anchors (markdown anchors usan slug del header).
-    toc = " · ".join(f"[{p}](#{p.lower().replace('-', '-')})" for p in pairs)
-    builder.markdown(f"**Ir a:** {toc}")
-
-    # Sub-sección por par.
+    # Sub-sección por par. Cada par es un único bloque markdown con
+    # encabezado + bullets + niveles, seguido de su tabla de timeframes
+    # (que ahora incluye la columna `pair` para que sea autoexplicativa
+    # aunque el render del frontend siga reordenando).
     for pair in pairs:
         p = payloads_by_pair.get(pair)
         if not p:
@@ -1306,7 +1310,7 @@ def _save_multi_pair_report(
         persistence = s.get("persistence_minutes")
         persistence_value = f"{persistence}m" if persistence is not None else "n/a"
 
-        body = [
+        block_lines = [
             f"## {pair}",
             "",
             f"**Régimen**: `{s['canonical_regime']}` · **Favorability**: {emoji} {fav} · "
@@ -1314,43 +1318,46 @@ def _save_multi_pair_report(
             "",
             _build_narrative(p),
         ]
-        builder.markdown("\n".join(body))
 
-        cols_tf, rows_tf = _build_timeframe_table(p)
-        if rows_tf:
-            builder.table(rows_tf, columns=cols_tf)
-
-        # S/R block (if any)
+        # Niveles cercanos (S/R 1h) — directamente embebidos en el mismo
+        # bloque markdown del par para que no queden flotando si el render
+        # reordena las secciones.
         sr = (p.get("meso_1h", {}) or {}).get("support_resistance") or {}
         sup, res = sr.get("support"), sr.get("resistance")
         if sup or res:
-            lines = ["### Niveles cercanos (1h)"]
+            block_lines += ["", f"**Niveles cercanos (1h) — {pair}**"]
             if sup:
-                lines.append(
-                    f"- **Soporte**: {sup['price']:.4f} "
+                block_lines.append(
+                    f"- Soporte: {sup['price']:.4f} "
                     f"({sup['distance_pct']*100:.2f}%, {sup['touches']} toques)"
                 )
             if res:
-                lines.append(
-                    f"- **Resistencia**: {res['price']:.4f} "
+                block_lines.append(
+                    f"- Resistencia: {res['price']:.4f} "
                     f"({res['distance_pct']*100:.2f}%, {res['touches']} toques)"
                 )
-            builder.markdown("\n".join(lines))
 
-        # Macro levels
         macro = p.get("macro_1d", {}).get("levels_macro", {})
-        if macro:
-            lines = ["### Niveles macro"]
-            for label, key in (
-                ("Máx 7d", "high_7d"), ("Mín 7d", "low_7d"),
-                ("Máx 30d", "high_30d"), ("Mín 30d", "low_30d"),
-                ("Máx 90d", "high_90d"), ("Mín 90d", "low_90d"),
-            ):
-                v = macro.get(key)
-                if v is not None and not (isinstance(v, float) and math.isnan(v)):
-                    lines.append(f"- **{label}**: {v:.4f}")
-            if len(lines) > 1:
-                builder.markdown("\n".join(lines))
+        macro_lines = []
+        for label, key in (
+            ("Máx 7d", "high_7d"), ("Mín 7d", "low_7d"),
+            ("Máx 30d", "high_30d"), ("Mín 30d", "low_30d"),
+            ("Máx 90d", "high_90d"), ("Mín 90d", "low_90d"),
+        ):
+            v = macro.get(key)
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                macro_lines.append(f"- {label}: {v:.4f}")
+        if macro_lines:
+            block_lines += ["", f"**Niveles macro — {pair}**"] + macro_lines
+
+        builder.markdown("\n".join(block_lines))
+
+        # Tabla de timeframes con la columna `pair` agregada al frente.
+        cols_tf, rows_tf = _build_timeframe_table(p)
+        if rows_tf:
+            cols_tf_with_pair = ["pair"] + cols_tf
+            rows_tf_with_pair = [{"pair": pair, **r} for r in rows_tf]
+            builder.table(rows_tf_with_pair, columns=cols_tf_with_pair)
 
     # Glosario único al final — usa el primer payload para selección
     # contextual; los términos base están siempre.
