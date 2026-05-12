@@ -199,11 +199,11 @@ def adx(
     if len(tr_s) == 0:
         return math.nan
 
-    plus_di = np.where(tr_s > 0, 100.0 * plus_s / tr_s, 0.0)
-    minus_di = np.where(tr_s > 0, 100.0 * minus_s / tr_s, 0.0)
-
-    di_sum = plus_di + minus_di
-    dx = np.where(di_sum > 0, 100.0 * np.abs(plus_di - minus_di) / di_sum, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        plus_di = np.where(tr_s > 0, 100.0 * plus_s / tr_s, 0.0)
+        minus_di = np.where(tr_s > 0, 100.0 * minus_s / tr_s, 0.0)
+        di_sum = plus_di + minus_di
+        dx = np.where(di_sum > 0, 100.0 * np.abs(plus_di - minus_di) / di_sum, 0.0)
 
     if len(dx) < period:
         return math.nan
