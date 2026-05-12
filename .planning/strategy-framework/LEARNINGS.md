@@ -195,6 +195,59 @@ aprendí _hacer mal_.
 
 ---
 
+### L9 — `ReportBuilder` reordena las secciones por defecto (2026-05-12)
+
+**Qué pasó.** Implementé el report multi-pair de `market_regime` con la
+secuencia `## PAIR → tabla TF → ## Niveles cercanos → ## Niveles macro`
+para cada par. Al verlo en la web UI, todas las tablas aparecían
+agrupadas juntas (sin headers que las identificaran) y todo el
+markdown agrupado en otro bloque. Parecía un bug aleatorio pero era
+determinístico: `ReportBuilder._render_sections()` por defecto hace
+`sorted(sections, key=type_priority)` con orden `kpi → plotly →
+table → markdown`. Insertar en cierto orden no implica que se
+renderice en ese orden.
+
+**Síntoma**: usuario reporta "las tablas no expresan a qué trading pair
+se refieren, y hay una falsa navegación con secciones de texto".
+
+**Qué hacer.**
+- Siempre que el orden de las secciones importe (multi-bloque,
+  per-entity sub-secciones), llamar `builder.manual_order()` apenas
+  se instancia.
+- Como red de seguridad: si una tabla está semánticamente atada a
+  una entidad (par, controller, etc.), incluir esa entidad como
+  primera columna de la tabla. Así sigue siendo legible aunque algo
+  reordene el HTML.
+- TOC con anchors markdown (`[label](#header-id)`) **no funciona**
+  con el render actual — los `<h2>` no llevan `id` autogenerado. Si
+  hace falta navegación verdadera, va a requerir extender
+  `ReportBuilder` (no improvisar con markdown plano).
+
+### L10 — Reportes generados con datos sintéticos contaminan la web UI (2026-05-12)
+
+**Qué pasó.** Para validar `_save_report` corrí un smoke con
+`make_candles(price=100.0)` (fixture del test). El report se persistió
+en `reports/` y apareció en el UI como si fuese un Run real, con
+"Niveles macro: Máx 7d 101.0000, Mín 90d 99.0000" — números que no
+existen para BTC. Usuario detectó la inconsistencia comparando con
+TradingView.
+
+**Síntoma**: report con valores absurdos pegado en disco junto a los
+reales, indistinguibles para el humano.
+
+**Qué hacer.**
+- **Nunca** llamar a `_save_report(...)` con fixtures sintéticos
+  apuntando a `reports/` real. Si hace falta probar el render,
+  monkey-patch el path (env var, `tempfile.TemporaryDirectory()`),
+  o saltearse la persistencia y solo verificar el `RoutineResult`.
+- Convención del proyecto: `reports/` contiene **solo** outputs de
+  Runs reales contra servidores reales.
+- Si por error se contamina la carpeta, borrar la entrada (también
+  del `reports_index.json` si quedó indexada) antes de pedirle al
+  usuario que valide nada.
+
+---
+
 ## Retired learnings
 
 (ninguno aún)
