@@ -174,7 +174,14 @@
 ## Fase 5 — Implementación
 
 - [ ] **5.1** Implementar `routines/capital_state.py`
-- [ ] **5.2** Implementar `routines/market_regime.py`
+- [x] **5.2** Implementar `routines/market_regime.py`
+    - [x] Módulo `condor/trading_agent/adaptive/indicators.py` (numpy/scipy, 34 tests)
+    - [x] Routine multi-timeframe (5m/1h/1d) con NATR/ADX/Hurst/EMA slope/linreg + S/R pivot detection
+    - [x] Canonical regime con excepción trending_with_pullback
+    - [x] Favorabilidad matrix + trigger_candidates
+    - [x] Dos vistas: user (KPIs+tabla+narrativa+glosario+report HTML) y agent (~560 chars)
+    - [x] 39 tests + smoke validado contra brigado (BTC-USDT, ETH-USDT)
+    - [ ] Persistence_minutes (regime_history.jsonl): se completa cuando el agente lea el output. Por ahora None.
 - [ ] **5.3** Implementar `routines/controller_performance.py` (D10)
 - [ ] **5.4** Implementar la MCP tool `update_controller_config`
 - [ ] **5.5** Crear el agent dir: `trading_agents/adaptive_pmm/`
