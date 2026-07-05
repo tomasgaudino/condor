@@ -1,0 +1,26 @@
+# Geometría SIMULADA del executor: 44 niveles × 454 quote/nivel · step 0.210%
+# ⚠ Requiere controller chessboard_lite >= fix 2026-07-02 (TP LIMIT).
+id: chessboard_lite_btcbrl_6
+controller_name: chessboard_lite
+controller_type: generic
+candles_config: []
+
+connector_name: binance          # ⚠ verificar connector real de BTC-BRL
+trading_pair: BTC-BRL
+
+total_amount_quote: 40000
+
+min_price: 305182.11
+max_price: 332757.96
+
+n_levels: 44
+take_profit_pct: 0.2
+min_spread_between_orders: 0.0005
+limit_buffer_pct: 0.5
+leverage: 1
+
+inv_floor_pct: 10
+inv_ceiling_pct: 90
+
+relaunch_margin_pct: 10
+relaunch_cooldown: 120

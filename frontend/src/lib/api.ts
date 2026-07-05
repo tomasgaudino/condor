@@ -886,6 +886,36 @@ export const api = {
       `/api/v1/servers/${server}/market/order-book?connector=${connector}&trading_pair=${pair}&depth=${depth}`,
     ),
 
+  // ── Chessboard Lite ──
+
+  getChessboardState: (server: string, controllerFilter = "chessboard_lite") =>
+    apiFetch<import("@/lib/chessboard").ChessboardState>(
+      `/api/v1/servers/${server}/chessboard/state?controller_filter=${controllerFilter}`,
+    ),
+
+  getChessboardImpact: (
+    server: string,
+    gridId: string,
+    body: {
+      draft: { min_price: number; max_price: number; n_levels?: number; take_profit_pct?: number; total_amount_quote?: number };
+      rebalance: boolean;
+    },
+  ) =>
+    apiFetch<import("@/lib/chessboard").ChessboardImpact>(
+      `/api/v1/servers/${server}/chessboard/${gridId}/impact`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  postChessboardAdjustment: (
+    server: string,
+    gridId: string,
+    body: { impact: unknown; draft: unknown; accepted: boolean; contradicted: boolean; note?: string },
+  ) =>
+    apiFetch<{ id: number }>(
+      `/api/v1/servers/${server}/chessboard/${gridId}/adjustments`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
   getCandles: (
     server: string,
     connector: string,

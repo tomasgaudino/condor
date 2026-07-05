@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   Brain,
+  Grid3x3,
   MessageSquare,
   Eye,
   Moon,
@@ -29,6 +30,7 @@ const NAV_ITEMS = [
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
+  { to: "/chessboard", icon: Grid3x3, label: "Chessboard" },
   { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/routines", icon: Zap, label: "Routines" },
 ] as const;
